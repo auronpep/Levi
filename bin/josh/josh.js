@@ -2,7 +2,7 @@
 // josh — CLI for the ~/.josh/ shared agent runtime.
 // Spec: ~/.josh/README.md
 //
-// v0.3.0 commands:
+// v0.4.0 commands:
 //   josh init                — create the directory tree + initial status.json (idempotent)
 //   josh status              — pretty-print status.json
 //   josh push todo "title"   — drop a todo into incoming/
@@ -10,6 +10,12 @@
 //   josh show <id>           — print any artifact by ID (full or last-6 suffix)
 //   josh tick                — one orchestrator heartbeat (intended for cron)
 //   josh control <action>    — send a control command to the orchestrator
+//   josh claim <id>          — triaged → in_progress (atomic, sets claim TTL)
+//   josh complete <id>       — in_progress → done (runs verify command if defined)
+//   josh fail <id>           — in_progress|triaged → failed (requires --reason)
+//   josh block <id>          — in_progress|triaged → blocked (requires --depends-on)
+//   josh unblock <id>        — blocked → triaged
+//   josh cancel <id>         — any live state → cancelled
 //
 // Exit codes per spec: 0 success, 1 validation, 2 not-found, 3 lock-conflict, 4 fs-error.
 
@@ -187,6 +193,62 @@ function findById(id) {
 function defaultActor() {
   if (process.env.JOSH_ACTOR) return process.env.JOSH_ACTOR;
   return `cli:${os.userInfo().username}`;
+}
+
+// ─── Mutate-op helpers ───────────────────────────────────────────────────────
+
+function errExit(msg, code) { err(`error: ${msg}`); return code; }
+
+// Locate a todo by full ID or last-N suffix and return its current state.
+// expectedStates: array of allowed states; if provided and not matched, returns error.
+function locateTodo(idOrSuffix, expectedStates) {
+  const found = findById(idOrSuffix);
+  if (!found) return { error: 'not found', code: 2 };
+  // Expect path: todo/<state>/<id>.json
+  const rel = found.relative.replace(/\\/g, '/');
+  if (!rel.startsWith('todo/')) return { error: `not a todo (in: ${rel})`, code: 1 };
+  const parts = rel.split('/');
+  if (parts.length !== 3) return { error: `unexpected path: ${rel}`, code: 1 };
+  const state = parts[1];
+  const id = parts[2].replace(/\.json$/, '');
+  if (expectedStates && !expectedStates.includes(state)) {
+    return { error: `todo is in state '${state}', expected one of: ${expectedStates.join(', ')}`, code: 1 };
+  }
+  return { path: found.path, state, id, relative: rel };
+}
+
+// Atomic move from src state to dst state. Returns 0 on success or error code.
+// On success, calls update(todo) to mutate the file in place (after move).
+function transitionTodo({ src, dst, srcStates, idOrSuffix, actor, eventName, eventDetails, update, audit }) {
+  const located = locateTodo(idOrSuffix, srcStates);
+  if (located.error) return { code: located.code, error: located.error };
+
+  const fromPath = located.path;
+  const toPath = path.join(JOSH_ROOT, 'todo', dst, `${located.id}.json`);
+
+  // Atomic move = lock acquisition.
+  try {
+    fs.renameSync(fromPath, toPath);
+  } catch (e) {
+    if (e.code === 'ENOENT') return { code: 3, error: `todo no longer in ${located.state} (race?)` };
+    if (e.code === 'EEXIST' || e.code === 'EPERM' || e.code === 'EACCES') {
+      return { code: 4, error: `rename failed: ${e.message}` };
+    }
+    throw e;
+  }
+
+  // Now we own the file at toPath. Read, mutate, write.
+  const todo = readJson(toPath);
+  if (!todo) return { code: 4, error: `malformed todo at ${dst}/${located.id}.json` };
+  todo.history = todo.history || [];
+  const now = new Date().toISOString();
+  todo.history.push({ at: now, actor, event: eventName, details: eventDetails || {} });
+  if (typeof update === 'function') update(todo, now);
+  writeJsonAtomic(toPath, todo);
+
+  if (audit) appendAudit({ actor, action: audit.action, id: located.id, details: audit.details || {} });
+
+  return { code: 0, id: located.id, todo };
 }
 
 // ─── Orchestrator helpers ────────────────────────────────────────────────────
@@ -900,6 +962,258 @@ function cmdControl(args) {
   return 0;
 }
 
+function cmdClaim(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        as:  { type: 'string' },
+        ttl: { type: 'string' }
+      },
+      allowPositionals: true,
+      strict: true
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const idArg = parsed.positionals[0];
+  if (!idArg) return errExit('claim requires <todo-id>', 1);
+
+  const actor = parsed.values.as || defaultActor();
+  const ttlSec = parsed.values.ttl ? parseInt(parsed.values.ttl, 10) : 3600;
+  if (!Number.isFinite(ttlSec) || ttlSec < 1 || ttlSec > 86400) {
+    return errExit('--ttl must be in [1, 86400] seconds', 1);
+  }
+
+  const r = transitionTodo({
+    srcStates: ['triaged'],
+    dst: 'in_progress',
+    idOrSuffix: idArg,
+    actor,
+    eventName: 'claimed',
+    eventDetails: { ttl_sec: ttlSec },
+    update: (todo, now) => {
+      todo.claim = { by: actor, at: now, ttl_sec: ttlSec };
+    },
+    audit: { action: 'todo.claimed', details: { ttl_sec: ttlSec } }
+  });
+  if (r.error) return errExit(r.error, r.code);
+  log(r.id);
+  return 0;
+}
+
+function cmdComplete(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        actor:         { type: 'string' },
+        note:          { type: 'string' },
+        'skip-verify': { type: 'boolean' }
+      },
+      allowPositionals: true,
+      strict: true
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const idArg = parsed.positionals[0];
+  if (!idArg) return errExit('complete requires <todo-id>', 1);
+
+  const actor = parsed.values.actor || defaultActor();
+
+  // Locate first so we can run verify before the move.
+  const located = locateTodo(idArg, ['in_progress']);
+  if (located.error) return errExit(located.error, located.code);
+
+  const todo = readJson(located.path);
+  if (!todo) return errExit(`malformed todo at ${located.relative}`, 4);
+
+  if (todo.verify && todo.verify.type === 'command' && !parsed.values['skip-verify']) {
+    try {
+      require('child_process').execSync(todo.verify.value, { stdio: 'pipe' });
+    } catch (e) {
+      err(`verify failed: ${todo.verify.value}`);
+      err(`exit code: ${e.status}`);
+      if (e.stderr) err(`stderr: ${e.stderr.toString().trim()}`);
+      return errExit('verification failed; not completing. use --skip-verify to override or `josh fail` to mark failed', 1);
+    }
+  }
+
+  const r = transitionTodo({
+    srcStates: ['in_progress'],
+    dst: 'done',
+    idOrSuffix: idArg,
+    actor,
+    eventName: 'completed',
+    eventDetails: parsed.values.note ? { note: parsed.values.note } : {},
+    update: (t, now) => {
+      t.completed_at = now;
+      t.completed_by = actor;
+      if (parsed.values.note) t.completion_note = parsed.values.note;
+    },
+    audit: { action: 'todo.completed', details: parsed.values.note ? { note: parsed.values.note } : {} }
+  });
+  if (r.error) return errExit(r.error, r.code);
+  log(r.id);
+  return 0;
+}
+
+function cmdFail(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        actor:  { type: 'string' },
+        reason: { type: 'string' }
+      },
+      allowPositionals: true,
+      strict: true
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const idArg = parsed.positionals[0];
+  if (!idArg) return errExit('fail requires <todo-id>', 1);
+  const reason = parsed.values.reason;
+  if (!reason) return errExit('fail requires --reason "<text>"', 1);
+  const actor = parsed.values.actor || defaultActor();
+
+  const r = transitionTodo({
+    srcStates: ['in_progress', 'triaged'],
+    dst: 'failed',
+    idOrSuffix: idArg,
+    actor,
+    eventName: 'failed',
+    eventDetails: { reason },
+    update: (t, now) => {
+      t.failed_at = now;
+      t.failed_by = actor;
+      t.failure_reason = reason;
+    },
+    audit: { action: 'todo.failed', details: { reason } }
+  });
+  if (r.error) return errExit(r.error, r.code);
+  log(r.id);
+  return 0;
+}
+
+function cmdBlock(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        actor:        { type: 'string' },
+        reason:       { type: 'string' },
+        'depends-on': { type: 'string' }
+      },
+      allowPositionals: true,
+      strict: true
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const idArg = parsed.positionals[0];
+  if (!idArg) return errExit('block requires <todo-id>', 1);
+  const dependsOn = parsed.values['depends-on'];
+  if (!dependsOn) return errExit('block requires --depends-on <other-id>[,<other-id>]', 1);
+  const actor = parsed.values.actor || defaultActor();
+  const newDeps = dependsOn.split(',').map(s => s.trim()).filter(Boolean);
+
+  const r = transitionTodo({
+    srcStates: ['in_progress', 'triaged'],
+    dst: 'blocked',
+    idOrSuffix: idArg,
+    actor,
+    eventName: 'blocked',
+    eventDetails: { depends_on: newDeps, reason: parsed.values.reason || null },
+    update: (t) => {
+      t.depends_on = Array.from(new Set([...(t.depends_on || []), ...newDeps]));
+      t.claim = null;
+      if (parsed.values.reason) t.block_reason = parsed.values.reason;
+    },
+    audit: { action: 'todo.blocked', details: { depends_on: newDeps, reason: parsed.values.reason || null } }
+  });
+  if (r.error) return errExit(r.error, r.code);
+  log(r.id);
+  return 0;
+}
+
+function cmdUnblock(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        actor: { type: 'string' },
+        note:  { type: 'string' }
+      },
+      allowPositionals: true,
+      strict: true
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const idArg = parsed.positionals[0];
+  if (!idArg) return errExit('unblock requires <todo-id>', 1);
+  const actor = parsed.values.actor || defaultActor();
+
+  const r = transitionTodo({
+    srcStates: ['blocked'],
+    dst: 'triaged',
+    idOrSuffix: idArg,
+    actor,
+    eventName: 'unblocked',
+    eventDetails: parsed.values.note ? { note: parsed.values.note } : {},
+    update: (t) => {
+      // Clear depends_on (caller decides whether deps were satisfied).
+      t.depends_on = [];
+      delete t.block_reason;
+    },
+    audit: { action: 'todo.unblocked', details: parsed.values.note ? { note: parsed.values.note } : {} }
+  });
+  if (r.error) return errExit(r.error, r.code);
+  log(r.id);
+  return 0;
+}
+
+function cmdCancel(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        actor:  { type: 'string' },
+        reason: { type: 'string' }
+      },
+      allowPositionals: true,
+      strict: true
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const idArg = parsed.positionals[0];
+  if (!idArg) return errExit('cancel requires <todo-id>', 1);
+  const actor = parsed.values.actor || defaultActor();
+
+  const r = transitionTodo({
+    srcStates: ['incoming', 'triaged', 'in_progress', 'blocked'],
+    dst: 'cancelled',
+    idOrSuffix: idArg,
+    actor,
+    eventName: 'cancelled',
+    eventDetails: parsed.values.reason ? { reason: parsed.values.reason } : {},
+    update: (t, now) => {
+      t.cancelled_at = now;
+      t.cancelled_by = actor;
+      if (parsed.values.reason) t.cancel_reason = parsed.values.reason;
+      t.claim = null;
+    },
+    audit: { action: 'todo.cancelled', details: parsed.values.reason ? { reason: parsed.values.reason } : {} }
+  });
+  if (r.error) return errExit(r.error, r.code);
+  log(r.id);
+  return 0;
+}
+
 function cmdHelp() {
   log(`josh — CLI for the ~/.josh/ shared agent runtime`);
   log(``);
@@ -913,6 +1227,17 @@ function cmdHelp() {
   log(`  show <id>                     print any artifact by ID (full or last-6)`);
   log(`  tick [--verbose] [--force]    one orchestrator heartbeat (cron driver)`);
   log(`  control <action> [args]       send a control command to the orchestrator`);
+  log(``);
+  log(`agent mutate ops (atomic state transitions):`);
+  log(`  claim <id> [--as actor] [--ttl 3600]    triaged → in_progress`);
+  log(`  complete <id> [--note "..."]            in_progress → done (runs verify)`);
+  log(`         [--skip-verify]                  skip verify command if defined`);
+  log(`  fail <id> --reason "..."                in_progress|triaged → failed`);
+  log(`  block <id> --depends-on <ids>           in_progress|triaged → blocked`);
+  log(`         [--reason "..."]`);
+  log(`  unblock <id> [--note "..."]             blocked → triaged`);
+  log(`  cancel <id> [--reason "..."]            any live state → cancelled`);
+  log(``);
   log(`  help                          show this message`);
   log(`  version                       show CLI version`);
   log(``);
@@ -959,6 +1284,12 @@ const COMMANDS = {
   show: cmdShow,
   tick: cmdTick,
   control: cmdControl,
+  claim: cmdClaim,
+  complete: cmdComplete,
+  fail: cmdFail,
+  block: cmdBlock,
+  unblock: cmdUnblock,
+  cancel: cmdCancel,
   help: cmdHelp,
   '--help': cmdHelp,
   '-h': cmdHelp,

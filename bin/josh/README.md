@@ -32,20 +32,28 @@ josh help        # list commands
 | `JOSH_ROOT` | `~/.josh` | Override the runtime root. Useful for tests. |
 | `JOSH_DEBUG` | unset | When set, print stack traces on error. |
 
-## v0.2 scope
+## v0.4 scope
 
-- `init` — create the directory tree (idempotent)
-- `status` — pretty-print the status board
-- `push todo "title" [flags]` — drop a todo into `incoming/`
-- `list todo [--state STATE]` — list todos with filtering
-- `show <id>` — print any artifact by full ID or last-6-char suffix
-- `help`, `version`
+Producer + observer + orchestrator + agent mutate ops:
 
-Everything else in the spec (`push handoff/approval/review`, `claim`, `complete`, `fail`, `block`, `cancel`, `approve`, `deny`, `reply`, `control …`, `lock …`, `validate`, `sweep`) ships incrementally.
+- `init` / `status` / `help` / `version`
+- `push todo "title" [flags]` — drop into `incoming/`
+- `list todo [filters]` / `show <id>` — read views
+- `tick [--verbose]` — one orchestrator heartbeat (cron driver)
+- `control <action>` — pause, resume, drain, undrain, sweep-now, set-interval, reorder
+- `claim <id>` — `triaged → in_progress` (atomic, sets claim TTL)
+- `complete <id>` — `in_progress → done` (runs verify command if defined)
+- `fail <id> --reason "..."` — `in_progress|triaged → failed`
+- `block <id> --depends-on <ids>` — `in_progress|triaged → blocked`
+- `unblock <id>` — `blocked → triaged`
+- `cancel <id>` — any live state → `cancelled`
+
+Future (v0.5+): `push handoff/approval/review`, `approve`, `deny`, `reply`, `lock acquire/release`, `validate`.
 
 ## Examples
 
 ```powershell
+# Producer side
 josh push todo "Fix flaky test in users.test.ts" --priority p1 --agent codex --label test,users
 josh push todo "Triage CI failures" --priority p0 --verify "pnpm test"
 josh list todo
@@ -53,7 +61,26 @@ josh list todo --state in_progress --priority p0
 josh list todo --state all --json
 josh show 01HXXXX                  # full ID
 josh show ABC123                   # last-6 suffix; warns on collision
+
+# Agent side (Claude Code, Codex, or any client picks up triaged work)
+josh claim ABC123 --as "codex:session-42" --ttl 3600
+josh complete ABC123 --note "passed users.test.ts after refactor"
+josh fail ABC123 --reason "external dependency unreachable"
+josh block ABC123 --depends-on XYZ789 --reason "wait for migration"
+josh unblock ABC123 --note "migration landed"
+josh cancel ABC123 --reason "duplicate of DEF456"
+
+# Orchestrator side (typically called by OpenClaw cron)
+josh tick                          # one heartbeat: triage incoming + sweep stale claims
+josh tick --verbose --force        # debug: ignore lock, multi-line output
+josh control pause
+josh control reorder ABC123 --priority p0
+josh control set-interval 60
 ```
+
+## Atomic state transitions
+
+Each mutate op uses `fs.renameSync` between state directories as the lock primitive. The rename **is** the lock acquisition — only one agent succeeds, the other gets `ENOENT` and exits cleanly with code 3 (lock-conflict). Read-modify-write happens AFTER the rename, when the agent exclusively owns the file at the new path.
 
 ## Exit codes
 
