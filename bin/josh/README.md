@@ -32,9 +32,9 @@ josh help        # list commands
 | `JOSH_ROOT` | `~/.josh` | Override the runtime root. Useful for tests. |
 | `JOSH_DEBUG` | unset | When set, print stack traces on error. |
 
-## v0.6 scope
+## v0.7 scope
 
-Full producer/observer/orchestrator/agent surface plus cross-agent handoffs, approvals, and resource locks:
+Five artifact types covered end-to-end:
 
 - `init` / `status` / `help` / `version`
 - **Todo**: `push todo`, `list todo`, `show <id>`, `claim`, `complete`, `fail`, `block`, `unblock`, `cancel`
@@ -42,8 +42,9 @@ Full producer/observer/orchestrator/agent surface plus cross-agent handoffs, app
 - **Handoffs** (cross-agent messaging): `push handoff`, `list handoffs`, `reply`, `ack`
 - **Approvals** (human-gated decisions): `push approval`, `list approvals`, `approve`, `deny`
 - **Locks** (general resource locks): `lock acquire`, `lock release`, `lock list` (also `list locks`)
+- **Reviews** (cross-agent code/design review): `push review`, `list reviews`, `review` (submit verdict)
 
-Future (v0.7+): `push review` + reviewer flow, `validate` (schema check), shared dossier helpers.
+Future (v0.8+): `validate` (JSON schema check), orchestrator smarts (auto-resolve expired approvals, label-based triage routing), shared dossier helpers.
 
 ## Examples
 
@@ -87,6 +88,15 @@ josh push approval --summary "Push 3 commits to main?" \
 josh list approvals
 josh approve <approval-id> --note "ok"
 josh deny <approval-id> --reason "wait for review on PR #12"
+
+# Reviews (cross-agent code/design review)
+josh push review --subject-ref "https://github.com/me/repo/pull/12" \
+  --reviewer codex --framing adversarial --priority p1 \
+  --notes "focus on lock TTL handling"
+josh list reviews
+josh review <review-id> --verdict request_changes \
+  --reasoning "Lock TTL is in seconds but help says hours. Pick one." \
+  --as "codex:reviewer-session"
 ```
 
 ## Atomic state transitions

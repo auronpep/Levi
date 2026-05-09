@@ -253,6 +253,26 @@ function locateApproval(idOrSuffix) {
   };
 }
 
+function locateReview(idOrSuffix) {
+  const found = findById(idOrSuffix);
+  if (!found) return { error: 'not found', code: 2 };
+  const rel = found.relative.replace(/\\/g, '/');
+  const parts = rel.split('/');
+  if (parts.length !== 3 || parts[0] !== 'reviews') {
+    return { error: `not a review: ${rel}`, code: 1 };
+  }
+  return {
+    path: found.path,
+    state: parts[1],
+    id: parts[2].replace(/\.json$/, ''),
+    relative: rel
+  };
+}
+
+const VALID_REVIEW_VERDICTS = ['approve', 'request_changes', 'block'];
+const VALID_SUBJECT_TYPES   = ['pr', 'file', 'approach', 'todo'];
+const VALID_FRAMINGS        = ['regular', 'adversarial'];
+
 // ─── Mutate-op helpers ───────────────────────────────────────────────────────
 
 function errExit(msg, code) { err(`error: ${msg}`); return code; }
@@ -610,9 +630,10 @@ function cmdPush(args) {
     case 'todo':     return cmdPushTodo(subArgs);
     case 'handoff':  return cmdPushHandoff(subArgs);
     case 'approval': return cmdPushApproval(subArgs);
+    case 'review':   return cmdPushReview(subArgs);
     default:
       err(`unknown artifact type: ${subtype}`);
-      err(`supported: todo, handoff, approval (review coming next)`);
+      err(`supported: todo, handoff, approval, review`);
       return 1;
   }
 }
@@ -724,11 +745,13 @@ function cmdList(args) {
     case 'handoff':   return cmdListHandoffs(subArgs);
     case 'approvals':
     case 'approval':  return cmdListApprovals(subArgs);
+    case 'reviews':
+    case 'review':    return cmdListReviews(subArgs);
     case 'locks':
     case 'lock':      return cmdLockList(subArgs);
     default:
       err(`unknown artifact type: ${subtype}`);
-      err(`supported: todo, handoff(s), approval(s), lock(s)`);
+      err(`supported: todo, handoff(s), approval(s), review(s), lock(s)`);
       return 1;
   }
 }
@@ -2006,6 +2029,215 @@ function cmdLockList(args) {
   return 0;
 }
 
+// ─── Review: push, verdict, list ─────────────────────────────────────────────
+
+function cmdPushReview(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        'subject-ref':   { type: 'string' },
+        'subject-type':  { type: 'string' },
+        reviewer:        { type: 'string' },
+        framing:         { type: 'string' },
+        deadline:        { type: 'string' },
+        priority:        { type: 'string' },
+        notes:           { type: 'string' },
+        'requested-by':  { type: 'string' }
+      },
+      allowPositionals: true,
+      strict: true
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const v = parsed.values;
+  if (!v['subject-ref']) {
+    return errExit('--subject-ref required (URL, file path, or ID)', 1);
+  }
+  if (!v.reviewer) return errExit('--reviewer required (claude|codex|<session-id>)', 1);
+
+  const subjectType = v['subject-type'] || 'pr';
+  if (!VALID_SUBJECT_TYPES.includes(subjectType)) {
+    return errExit(`--subject-type must be one of: ${VALID_SUBJECT_TYPES.join(', ')}`, 1);
+  }
+  const framing = v.framing || 'regular';
+  if (!VALID_FRAMINGS.includes(framing)) {
+    return errExit(`--framing must be one of: ${VALID_FRAMINGS.join(', ')}`, 1);
+  }
+  const priority = v.priority || 'p2';
+  if (!VALID_PRIORITIES.includes(priority)) {
+    return errExit(`invalid priority '${priority}'. allowed: ${VALID_PRIORITIES.join(', ')}`, 1);
+  }
+
+  const id = ulid();
+  const now = new Date().toISOString();
+  const requestedBy = v['requested-by'] || defaultActor();
+
+  const review = {
+    schema: 1,
+    id,
+    created_at: now,
+    requested_by: requestedBy,
+    subject_type: subjectType,
+    subject_ref: v['subject-ref'],
+    framing,
+    reviewer: v.reviewer,
+    deadline: v.deadline || null,
+    priority,
+    notes: v.notes || '',
+    history: [{ at: now, actor: requestedBy, event: 'requested' }]
+  };
+
+  const dir = path.join(JOSH_ROOT, 'reviews', 'pending');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  writeJsonAtomic(path.join(dir, `${id}.json`), review);
+
+  appendAudit({
+    actor: requestedBy,
+    action: 'review.requested',
+    id,
+    details: { reviewer: v.reviewer, subject_type: subjectType, subject_ref: v['subject-ref'], framing }
+  });
+
+  log(id);
+  return 0;
+}
+
+function cmdReview(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        verdict:   { type: 'string' },
+        reasoning: { type: 'string' },
+        as:        { type: 'string' },
+        actor:     { type: 'string' }
+      },
+      allowPositionals: true,
+      strict: true
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const idArg = parsed.positionals[0];
+  if (!idArg) return errExit('review requires <review-id>', 1);
+  const verdict = parsed.values.verdict;
+  if (!verdict) return errExit('--verdict required (approve|request_changes|block)', 1);
+  if (!VALID_REVIEW_VERDICTS.includes(verdict)) {
+    return errExit(`--verdict must be one of: ${VALID_REVIEW_VERDICTS.join(', ')}`, 1);
+  }
+  const reasoning = parsed.values.reasoning;
+  if (!reasoning) return errExit('--reasoning "<text>" required (markdown OK)', 1);
+
+  const located = locateReview(idArg);
+  if (located.error) return errExit(located.error, located.code);
+  if (located.state !== 'pending') return errExit(`review already ${located.state}`, 1);
+
+  const fromPath = located.path;
+  const toPath = path.join(JOSH_ROOT, 'reviews', 'done', `${located.id}.json`);
+
+  try { fs.renameSync(fromPath, toPath); }
+  catch (e) {
+    if (e.code === 'ENOENT') return errExit('review no longer pending (race?)', 3);
+    throw e;
+  }
+
+  const review = readJson(toPath);
+  if (!review) return errExit('malformed review', 4);
+  const now = new Date().toISOString();
+  const actor = resolveActor(parsed.values);
+  review.verdict = verdict;
+  review.reasoning = reasoning;
+  review.completed_at = now;
+  review.completed_by = actor;
+  review.history = review.history || [];
+  review.history.push({
+    at: now,
+    actor,
+    event: 'verdict_submitted',
+    details: { verdict }
+  });
+  writeJsonAtomic(toPath, review);
+
+  appendAudit({
+    actor,
+    action: 'review.completed',
+    id: located.id,
+    details: { verdict, reviewer: review.reviewer }
+  });
+
+  log(located.id);
+  return 0;
+}
+
+function cmdListReviews(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        state:    { type: 'string' },
+        reviewer: { type: 'string' },
+        verdict:  { type: 'string' },
+        json:     { type: 'boolean' }
+      },
+      allowPositionals: false,
+      strict: true
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const states = parsed.values.state
+    ? (parsed.values.state === 'all' ? ['pending', 'done'] : [parsed.values.state])
+    : ['pending'];
+  for (const s of states) {
+    if (!['pending', 'done'].includes(s)) {
+      return errExit(`--state must be pending, done, or all`, 1);
+    }
+  }
+
+  const items = [];
+  for (const state of states) {
+    const dir = path.join(JOSH_ROOT, 'reviews', state);
+    let files;
+    try { files = fs.readdirSync(dir).filter(f => f.endsWith('.json')); } catch (e) { continue; }
+    for (const f of files) {
+      const r = readJson(path.join(dir, f));
+      if (!r) continue;
+      if (parsed.values.reviewer && r.reviewer !== parsed.values.reviewer) continue;
+      if (parsed.values.verdict && r.verdict !== parsed.values.verdict) continue;
+      items.push({ ...r, _state: state });
+    }
+  }
+  const rank = { p0: 0, p1: 1, p2: 2, p3: 3 };
+  items.sort((a, b) => {
+    const pa = rank[a.priority] ?? 99, pb = rank[b.priority] ?? 99;
+    if (pa !== pb) return pa - pb;
+    return (a.created_at || '').localeCompare(b.created_at || '');
+  });
+
+  if (parsed.values.json) {
+    log(JSON.stringify(items, null, 2));
+    return 0;
+  }
+  if (items.length === 0) { log('(no reviews match)'); return 0; }
+
+  log(`id (last 6)  state    pri  age      reviewer        framing       verdict          subject`);
+  log(`-----------  -------  ---  -------  --------------  ------------  ---------------  ----------------------`);
+  for (const r of items) {
+    const idShort = (r.id || '').slice(-6);
+    const state = (r._state || '').padEnd(7);
+    const pri = (r.priority || '').padEnd(3);
+    const age = formatAge(r.created_at).padEnd(7);
+    const reviewer = (r.reviewer || '').slice(0, 14).padEnd(14);
+    const framing = (r.framing || '').padEnd(12);
+    const verdict = (r.verdict || '—').padEnd(15);
+    const subj = (r.subject_ref || '').slice(0, 60);
+    log(`${idShort}       ${state}  ${pri}  ${age}  ${reviewer}  ${framing}  ${verdict}  ${subj}`);
+  }
+  return 0;
+}
+
 function cmdHelp() {
   log(`josh — CLI for the ~/.josh/ shared agent runtime`);
   log(``);
@@ -2043,6 +2275,12 @@ function cmdHelp() {
   log(`  list approvals [--state pending|done|all]`);
   log(`  approve <approval-id> [--note "..."]`);
   log(`  deny <approval-id> [--reason "..."]`);
+  log(``);
+  log(`reviews (cross-agent code/design review):`);
+  log(`  push review --subject-ref <url|path> --reviewer AGENT [--subject-type pr|file|approach|todo]`);
+  log(`         [--framing regular|adversarial] [--deadline ISO] [--priority pX] [--notes "..."]`);
+  log(`  list reviews [--state pending|done|all] [--reviewer X] [--verdict V]`);
+  log(`  review <review-id> --verdict approve|request_changes|block --reasoning "..." [--as ACTOR]`);
   log(``);
   log(`locks (general resource locks):`);
   log(`  lock acquire <resource> [--ttl 1h] [--reason "..."]   acquire a lock`);
@@ -2106,6 +2344,7 @@ const COMMANDS = {
   ack: cmdAck,
   approve: cmdApprove,
   deny: cmdDeny,
+  review: cmdReview,
   lock: cmdLock,
   help: cmdHelp,
   '--help': cmdHelp,
