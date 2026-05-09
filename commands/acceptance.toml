@@ -1,2 +1,0 @@
-description = "Closed-loop delivery (e.g. /acceptance strict, /acceptance light, /acceptance off)"
-prompt = "User typed: /acceptance {{args}}. Hook updated flag.\n\nIf empty: show state.\n\nIf 'off': confirm.\n\nOtherwise (strict|light): confirm mode. Reminder: strict = every non-trivial task gets explicit criteria before execute; light = same for medium+ tasks only. After 'done', verify against criteria explicitly."

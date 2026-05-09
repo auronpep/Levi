@@ -4,7 +4,7 @@ Minimal Claude Code plugin shell. Same dispatcher skeleton as [Reuben](https://g
 
 ## What's in the box
 
-- **47 axis commands** in `commands/*.toml` — the full dispatcher surface, copied verbatim from Reuben. Typing `/think`, `/style`, `/role`, etc. is wired up at the command level.
+- **47 axis commands** in `commands/*.md` — the full dispatcher surface, copied verbatim from Reuben. Typing `/think`, `/style`, `/role`, etc. is wired up at the command level.
 - **43 empty axis folders** in `skills/<axis>/` — one per axis, ready for you to drop modes into.
 - **Empty agent groups** in `agents/{critics,specialists,cohort}/`.
 - **Empty hook groups** in `hooks/{guards,reporters,lib}/`.
@@ -52,7 +52,7 @@ See [MANUAL.md](MANUAL.md) for the axis-by-axis list and folder map.
 
 ## How the commands work without modes
 
-The TOML commands in `commands/` reference skills (e.g. "list directories in `skills/thinking/`"). With zero modes installed, the response will be "no modes available." That's the expected shell behavior — typing `/think foo` will note that `foo` doesn't exist because nothing is installed yet.
+The Markdown commands in `commands/` reference skills (e.g. "list directories in `skills/thinking/`"). With zero modes installed, the response will be "no modes available." That's the expected shell behavior — typing `/think foo` will note that `foo` doesn't exist because nothing is installed yet.
 
 When you add `skills/thinking/planning/SKILL.md`, `/think planning` will start working.
 
@@ -67,7 +67,7 @@ C:\Levi\
 ├── .claude-plugin\
 │   ├── plugin.json
 │   └── marketplace.json
-├── commands\           # 47 axis commands (.toml)
+├── commands\           # 47 axis commands (.md)
 ├── skills\             # 43 empty axis folders
 │   ├── thinking\
 │   ├── talk\

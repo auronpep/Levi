@@ -1,2 +1,0 @@
-description = "Try multiple approaches in parallel (e.g. /branch 3, /branch off)"
-prompt = "User typed: /branch {{args}}. Hook updated active flag.\n\nIf empty: show current state.\n\nIf 'off': confirm — single-approach mode.\n\nOtherwise (a number N): confirm parallel-approach mode with N parallel attempts. For substantive tasks: decompose into N angles, spawn N subagents in parallel, reconcile, recommend best. Cost = N× per task; use deliberately."

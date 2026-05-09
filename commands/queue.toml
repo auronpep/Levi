@@ -1,2 +1,0 @@
-description = "Defer side-tasks to /todo instead of executing (e.g. /queue on, /queue off)"
-prompt = "User typed: /queue {{args}}. Hook updated active flag.\n\nIf empty: show state.\n\nIf 'on': confirm queue mode. From now on, anything you'd 'also do' or 'check next' gets a /todo add instead of immediate execution. The user stays focused on the main task; /loop picks up the queue later.\n\nIf 'off': confirm normal execute mode."

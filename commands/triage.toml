@@ -1,2 +1,0 @@
-description = "Triage discipline (e.g. /triage on, /triage off, /triage <list-input>)"
-prompt = "User typed: /triage {{args}}.\n\nIf empty: show state.\n\nIf 'on': confirm — triage discipline active for upcoming inputs.\n\nIf 'off': confirm — back to normal.\n\nOtherwise (the args are list input or path to a file): one-shot triage. Run each item through the rubric (priority / effort / owner / action). Output table per skills/triage/README.md format. Recommend 1-3 next steps."

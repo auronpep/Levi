@@ -9,3 +9,4 @@ incoming/
 
 # Local Claude Code state (per-machine)
 .claude/settings.local.json
+.claude/worktrees/

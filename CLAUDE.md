@@ -24,7 +24,7 @@ A skeleton plugin where the dispatcher surface (47 slash commands) exists but no
 ### Conventions
 
 - **Skills:** SKILL.md with frontmatter. `description` field is the trigger — be specific about WHEN to load and when NOT.
-- **Slash commands:** TOML for simple cases (description + prompt only); markdown with frontmatter when you need tool restriction or model choice.
+- **Slash commands:** Markdown with YAML frontmatter (`description:` required; add `allowed-tools:` / `disable-model-invocation:` / `argument-hint:` when you need them). Body uses `$ARGUMENTS` for the slash-command arg.
 - **Hooks:** Node 14+ baseline (CommonJS). Always `process.exit(0)` cleanly even on error. Cross-platform paths via `path.join`, `os.homedir()`. Honour `CLAUDE_CONFIG_DIR`. Silent-fail on filesystem errors.
 - **No secrets in this repo**, even in gitignored files.
 
