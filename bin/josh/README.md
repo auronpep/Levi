@@ -32,17 +32,18 @@ josh help        # list commands
 | `JOSH_ROOT` | `~/.josh` | Override the runtime root. Useful for tests. |
 | `JOSH_DEBUG` | unset | When set, print stack traces on error. |
 
-## v0.5 scope
+## v0.6 scope
 
-Full producer/observer/orchestrator/agent surface plus cross-agent handoffs and approvals:
+Full producer/observer/orchestrator/agent surface plus cross-agent handoffs, approvals, and resource locks:
 
 - `init` / `status` / `help` / `version`
 - **Todo**: `push todo`, `list todo`, `show <id>`, `claim`, `complete`, `fail`, `block`, `unblock`, `cancel`
 - **Orchestrator**: `tick`, `control <action>`
 - **Handoffs** (cross-agent messaging): `push handoff`, `list handoffs`, `reply`, `ack`
 - **Approvals** (human-gated decisions): `push approval`, `list approvals`, `approve`, `deny`
+- **Locks** (general resource locks): `lock acquire`, `lock release`, `lock list` (also `list locks`)
 
-Future (v0.6+): `push review` + reviewer flow, `lock acquire/release`, `validate` (schema check), shared dossier helpers.
+Future (v0.7+): `push review` + reviewer flow, `validate` (schema check), shared dossier helpers.
 
 ## Examples
 

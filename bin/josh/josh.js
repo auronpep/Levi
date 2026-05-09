@@ -724,9 +724,11 @@ function cmdList(args) {
     case 'handoff':   return cmdListHandoffs(subArgs);
     case 'approvals':
     case 'approval':  return cmdListApprovals(subArgs);
+    case 'locks':
+    case 'lock':      return cmdLockList(subArgs);
     default:
       err(`unknown artifact type: ${subtype}`);
-      err(`supported: todo, handoff(s), approval(s)`);
+      err(`supported: todo, handoff(s), approval(s), lock(s)`);
       return 1;
   }
 }
@@ -1802,6 +1804,208 @@ function cmdListApprovals(args) {
   return 0;
 }
 
+// ─── Locks: acquire, release, list ───────────────────────────────────────────
+
+function parseTtl(raw) {
+  const m = raw.match(/^(\d+)\s*(s|m|h|d)?$/i);
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  const unit = (m[2] || 's').toLowerCase();
+  return n * ({ s: 1, m: 60, h: 3600, d: 86400 }[unit]);
+}
+
+function cmdLock(args) {
+  const sub = args[0];
+  if (!sub) {
+    err('error: lock subcommand required. usage: josh lock <acquire|release|list>');
+    return 1;
+  }
+  const subArgs = args.slice(1);
+  switch (sub) {
+    case 'acquire': return cmdLockAcquire(subArgs);
+    case 'release': return cmdLockRelease(subArgs);
+    case 'list':    return cmdLockList(subArgs);
+    default:
+      err(`unknown lock subcommand: ${sub}`);
+      err('supported: acquire, release, list');
+      return 1;
+  }
+}
+
+function cmdLockAcquire(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        ttl:    { type: 'string' },
+        reason: { type: 'string' },
+        as:     { type: 'string' },
+        actor:  { type: 'string' }
+      },
+      allowPositionals: true,
+      strict: true
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const resource = parsed.positionals[0];
+  if (!resource) return errExit('lock acquire requires <resource>', 1);
+  if (!/^[\w.-]+$/.test(resource)) {
+    return errExit('resource must contain only word chars, hyphens, or dots', 1);
+  }
+
+  const ttlRaw = parsed.values.ttl || '1h';
+  const ttlSec = parseTtl(ttlRaw);
+  if (ttlSec === null || ttlSec < 1 || ttlSec > 86400) {
+    return errExit('--ttl format: <n>[s|m|h|d] in [1, 86400] seconds (e.g. 1h, 30m)', 1);
+  }
+
+  const actor = resolveActor(parsed.values);
+  const lockFile = path.join(JOSH_ROOT, 'locks', `${resource}.json`);
+  const now = Date.now();
+
+  if (fs.existsSync(lockFile)) {
+    const existing = readJson(lockFile);
+    if (existing && existing.expires_at) {
+      const expiresAt = new Date(existing.expires_at).getTime();
+      if (now < expiresAt) {
+        err(`error: lock '${resource}' held by ${existing.holder} until ${existing.expires_at}`);
+        return 3;
+      }
+    }
+    // Stale or unparseable — remove before re-acquiring.
+    try { fs.unlinkSync(lockFile); } catch (e) { /* race: another agent may have cleaned it */ }
+  }
+
+  const acquiredAt = new Date(now).toISOString();
+  const expiresAt = new Date(now + ttlSec * 1000).toISOString();
+  const lockObj = {
+    schema: 1,
+    resource,
+    holder: actor,
+    acquired_at: acquiredAt,
+    expires_at: expiresAt,
+    reason: parsed.values.reason || null
+  };
+
+  // wx = exclusive create: fails with EEXIST if another agent won the race.
+  try {
+    fs.writeFileSync(lockFile, JSON.stringify(lockObj, null, 2) + '\n', { flag: 'wx' });
+  } catch (e) {
+    if (e.code === 'EEXIST') {
+      err(`error: lock '${resource}' acquired by another agent concurrently`);
+      return 3;
+    }
+    err(`error: could not write lock file: ${e.message}`);
+    return 4;
+  }
+
+  appendAudit({
+    actor,
+    action: 'lock.acquired',
+    id: resource,
+    details: { holder: actor, acquired_at: acquiredAt, expires_at: expiresAt, reason: lockObj.reason }
+  });
+
+  log(resource);
+  return 0;
+}
+
+function cmdLockRelease(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        as:    { type: 'string' },
+        actor: { type: 'string' }
+      },
+      allowPositionals: true,
+      strict: true
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const resource = parsed.positionals[0];
+  if (!resource) return errExit('lock release requires <resource>', 1);
+
+  const lockFile = path.join(JOSH_ROOT, 'locks', `${resource}.json`);
+  if (!fs.existsSync(lockFile)) {
+    err(`error: lock '${resource}' not found`);
+    return 2;
+  }
+
+  const existing = readJson(lockFile);
+  const actor = resolveActor(parsed.values);
+
+  try { fs.unlinkSync(lockFile); }
+  catch (e) {
+    if (e.code === 'ENOENT') {
+      err(`error: lock '${resource}' already gone (race?)`);
+      return 3;
+    }
+    err(`error: could not remove lock: ${e.message}`);
+    return 4;
+  }
+
+  appendAudit({
+    actor,
+    action: 'lock.released',
+    id: resource,
+    details: { previous_holder: existing?.holder || null, acquired_at: existing?.acquired_at || null }
+  });
+
+  log(resource);
+  return 0;
+}
+
+function cmdLockList(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: { json: { type: 'boolean' } },
+      allowPositionals: false,
+      strict: true
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const dir = path.join(JOSH_ROOT, 'locks');
+  let files;
+  try { files = fs.readdirSync(dir).filter(f => f.endsWith('.json') && !f.endsWith('.tmp')); }
+  catch (e) { files = []; }
+
+  const now = Date.now();
+  const locks = [];
+  for (const f of files) {
+    const lock = readJson(path.join(dir, f));
+    if (!lock) continue;
+    const expired = lock.expires_at && now >= new Date(lock.expires_at).getTime();
+    locks.push({ ...lock, _expired: expired });
+  }
+  locks.sort((a, b) => (a.acquired_at || '').localeCompare(b.acquired_at || ''));
+
+  if (parsed.values.json) {
+    log(JSON.stringify(locks, null, 2));
+    return 0;
+  }
+  if (locks.length === 0) {
+    log('(no locks held)');
+    return 0;
+  }
+
+  log(`resource             holder                   expires_at            status   reason`);
+  log(`-------------------  -----------------------  --------------------  -------  -------------------------`);
+  for (const l of locks) {
+    const res    = (l.resource || '').slice(0, 19).padEnd(19);
+    const holder = (l.holder   || '').slice(0, 23).padEnd(23);
+    const expires = (l.expires_at || '—').padEnd(20);
+    const status = l._expired ? 'expired' : 'held   ';
+    const reason = (l.reason || '—').slice(0, 50);
+    log(`${res}  ${holder}  ${expires}  ${status}  ${reason}`);
+  }
+  return 0;
+}
+
 function cmdHelp() {
   log(`josh — CLI for the ~/.josh/ shared agent runtime`);
   log(``);
@@ -1839,6 +2043,12 @@ function cmdHelp() {
   log(`  list approvals [--state pending|done|all]`);
   log(`  approve <approval-id> [--note "..."]`);
   log(`  deny <approval-id> [--reason "..."]`);
+  log(``);
+  log(`locks (general resource locks):`);
+  log(`  lock acquire <resource> [--ttl 1h] [--reason "..."]   acquire a lock`);
+  log(`  lock release <resource>                                release a lock`);
+  log(`  lock list [--json]                                     list held locks`);
+  log(`  list locks                    alias for lock list`);
   log(``);
   log(`  help                          show this message`);
   log(`  version                       show CLI version`);
@@ -1896,6 +2106,7 @@ const COMMANDS = {
   ack: cmdAck,
   approve: cmdApprove,
   deny: cmdDeny,
+  lock: cmdLock,
   help: cmdHelp,
   '--help': cmdHelp,
   '-h': cmdHelp,

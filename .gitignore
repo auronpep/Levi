@@ -10,3 +10,7 @@ incoming/
 # Local Claude Code state (per-machine)
 .claude/settings.local.json
 .claude/worktrees/
+
+# Per-session agent scratch trackers (codex/claude write their own
+# local task notes; the canonical queue lives in ~/.josh/, not here)
+tasks/
