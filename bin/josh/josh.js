@@ -407,7 +407,31 @@ function moveTodo(fromPath, toState, todo) {
   fs.renameSync(fromPath, toPath);
 }
 
-function triageOne(file, opts) {
+// Read routing config from ~/.josh/orchestrator/routing.json. Returns null if missing.
+// Schema:
+//   { "schema": 1, "rules": [ { "if_labels": ["test"], "agent": "codex" }, ... ] }
+function readRoutingConfig() {
+  const cfgPath = path.join(JOSH_ROOT, 'orchestrator', 'routing.json');
+  if (!fs.existsSync(cfgPath)) return null;
+  return readJson(cfgPath);
+}
+
+// If todo.agent is 'auto' AND routing rules match labels, suggest a better agent.
+// Returns { agent, matched_rule } or { agent: 'auto' } if no rule matches.
+function applyRouting(todo, cfg) {
+  if (todo.agent && todo.agent !== 'auto') return { agent: todo.agent };
+  if (!cfg || !Array.isArray(cfg.rules)) return { agent: 'auto' };
+  const labels = new Set(todo.labels || []);
+  for (const rule of cfg.rules) {
+    if (!Array.isArray(rule.if_labels) || !rule.agent) continue;
+    if (rule.if_labels.some((l) => labels.has(l))) {
+      return { agent: rule.agent, matched_rule: rule.if_labels.join(',') };
+    }
+  }
+  return { agent: cfg.default_agent || 'auto' };
+}
+
+function triageOne(file, opts, routingCfg) {
   const todo = readJson(file.path);
   if (!todo) {
     err(`warn: skipping malformed ${file.path}; moving to failed/`);
@@ -417,16 +441,83 @@ function triageOne(file, opts) {
     return { result: 'malformed' };
   }
   const now = new Date().toISOString();
+
+  // Smart routing: if agent is 'auto', try to map labels → agent.
+  const route = applyRouting(todo, routingCfg);
+  let routedFrom = null;
+  if (route.agent !== todo.agent) {
+    routedFrom = todo.agent;
+    todo.agent = route.agent;
+  }
+
   todo.history = todo.history || [];
-  todo.history.push({ at: now, actor: 'orchestrator', event: 'triaged' });
+  todo.history.push({
+    at: now,
+    actor: 'orchestrator',
+    event: 'triaged',
+    ...(routedFrom !== null
+      ? { details: { routed_from: routedFrom, routed_to: route.agent, matched_rule: route.matched_rule || null } }
+      : {})
+  });
   moveTodo(file.path, 'triaged', todo);
   appendAudit({
     actor: 'orchestrator',
     action: 'todo.triaged',
     id: todo.id,
-    details: { agent: todo.agent, priority: todo.priority }
+    details: {
+      agent: todo.agent,
+      priority: todo.priority,
+      ...(routedFrom !== null ? { routed_from: routedFrom, matched_rule: route.matched_rule || null } : {})
+    }
   });
-  return { result: 'triaged', id: todo.id };
+  return { result: 'triaged', id: todo.id, routed: routedFrom !== null };
+}
+
+// Apply default decision to approvals whose default_after_sec has elapsed.
+// Returns count of expired/decided.
+function expireApprovals() {
+  let expired = 0;
+  const dir = path.join(JOSH_ROOT, 'approvals', 'pending');
+  for (const file of listJsonIn(dir)) {
+    const a = readJson(file.path);
+    if (!a) continue;
+    if (!a.default_after_sec || !a.default_choice || !a.created_at) continue;
+    const expiresAt = new Date(a.created_at).getTime() + a.default_after_sec * 1000;
+    if (Date.now() < expiresAt) continue;
+
+    // Apply default decision: atomic move pending → done.
+    const toPath = path.join(JOSH_ROOT, 'approvals', 'done', `${a.id}.json`);
+    try { fs.renameSync(file.path, toPath); }
+    catch (e) {
+      if (e.code === 'ENOENT') continue; // someone else handled it
+      err(`warn: expireApprovals failed for ${a.id}: ${e.message}`);
+      continue;
+    }
+
+    const updated = readJson(toPath) || a;
+    const now = new Date().toISOString();
+    updated.decision = a.default_choice;
+    updated.decided_at = now;
+    updated.decided_by = 'orchestrator:auto-expired';
+    updated.expired = true;
+    updated.history = updated.history || [];
+    updated.history.push({
+      at: now,
+      actor: 'orchestrator',
+      event: 'auto_expired',
+      details: { applied: a.default_choice, after_sec: a.default_after_sec }
+    });
+    writeJsonAtomic(toPath, updated);
+
+    appendAudit({
+      actor: 'orchestrator',
+      action: 'approval.expired',
+      id: a.id,
+      details: { applied: a.default_choice, after_sec: a.default_after_sec }
+    });
+    expired++;
+  }
+  return expired;
 }
 
 function sweepStaleClaims(opts) {
@@ -900,7 +991,9 @@ function cmdTick(args) {
 
   let controlsProcessed = 0;
   let triaged = 0;
+  let routed = 0;
   let swept = 0;
+  let expired = 0;
   let triagedFailed = 0;
 
   try {
@@ -911,20 +1004,28 @@ function cmdTick(args) {
     const paused = isPaused();
     const draining = isDraining();
 
-    // 3. Triage incoming → triaged (skip if paused; allow during drain)
+    // 3. Load routing config once per tick (cheap; null if file missing)
+    const routingCfg = readRoutingConfig();
+
+    // 4. Triage incoming → triaged (skip if paused; allow during drain)
     if (!paused) {
       const incomingDir = path.join(JOSH_ROOT, 'todo', 'incoming');
       for (const file of listJsonIn(incomingDir)) {
-        const r = triageOne(file);
-        if (r.result === 'triaged') triaged++;
-        else triagedFailed++;
+        const r = triageOne(file, null, routingCfg);
+        if (r.result === 'triaged') {
+          triaged++;
+          if (r.routed) routed++;
+        } else triagedFailed++;
       }
     }
 
-    // 4. Sweep stale claims
+    // 5. Sweep stale claims
     swept = sweepStaleClaims();
 
-    // 5. Update status board
+    // 6. Auto-resolve expired approvals (default decision applied)
+    expired = expireApprovals();
+
+    // 7. Update status board
     const status = readStatus();
     status.agents.orchestrator = {
       ...status.agents.orchestrator,
@@ -939,7 +1040,7 @@ function cmdTick(args) {
     status.updated_at = new Date().toISOString();
     writeStatus(status);
 
-    // 6. Audit the tick
+    // 8. Audit the tick
     appendAudit({
       actor: 'orchestrator',
       action: 'orchestrator.tick',
@@ -947,23 +1048,25 @@ function cmdTick(args) {
       details: {
         controls: controlsProcessed,
         triaged,
+        routed,
         triaged_failed: triagedFailed,
         swept,
+        expired_approvals: expired,
         paused,
         draining,
         duration_ms: Date.now() - tickStart.getTime()
       }
     });
 
-    // 7. One-line summary (or verbose multi-line)
+    // 9. One-line summary (or verbose multi-line)
     const tickN = status.agents.orchestrator.tick_count;
     if (verbose) {
       log(`tick ${tickN} @ ${status.agents.orchestrator.last_tick}`);
-      log(`  controls: ${controlsProcessed}  triaged: ${triaged}  swept: ${swept}  failed: ${triagedFailed}`);
+      log(`  controls: ${controlsProcessed}  triaged: ${triaged} (routed: ${routed})  swept: ${swept}  expired: ${expired}  failed: ${triagedFailed}`);
       log(`  paused: ${paused}  draining: ${draining}`);
       log(`  queue: incoming=${status.queue.incoming} triaged=${status.queue.triaged} in_progress=${status.queue.in_progress}`);
     } else {
-      log(`tick ${tickN}: triaged=${triaged} swept=${swept} controls=${controlsProcessed}${paused ? ' [paused]' : ''}${draining ? ' [draining]' : ''}`);
+      log(`tick ${tickN}: triaged=${triaged}${routed > 0 ? ` (routed:${routed})` : ''} swept=${swept} expired=${expired} controls=${controlsProcessed}${paused ? ' [paused]' : ''}${draining ? ' [draining]' : ''}`);
     }
   } finally {
     lockRelease();

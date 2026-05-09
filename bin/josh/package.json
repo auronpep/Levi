@@ -1,6 +1,6 @@
 {
   "name": "@levi/josh",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "josh — CLI for the ~/.josh/ shared agent runtime. Implements the spec at ~/.josh/README.md.",
   "bin": {
     "josh": "josh.js"
