@@ -51,6 +51,7 @@ Every axis Levi ships, the command that fires it, and the folder where its items
 | `/template` | `skills/template/<name>/` | Output templates |
 | `/think` | `skills/thinking/<mode>/` | Mode |
 | `/todo` | `skills/todo/` | Inline + subcommands |
+| `/josh` | `bin/josh/` (CLI) + `~/.josh/` (runtime) | Cross-agent shared runtime — todos, handoffs, approvals, audit. See `~/.josh/README.md`. |
 | `/triage` | `skills/triage/` | Inline behavior |
 | `/working-memory` | `skills/working-memory/` | Inline behavior |
 
