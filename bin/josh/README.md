@@ -32,9 +32,28 @@ josh help        # list commands
 | `JOSH_ROOT` | `~/.josh` | Override the runtime root. Useful for tests. |
 | `JOSH_DEBUG` | unset | When set, print stack traces on error. |
 
-## v0.1 scope
+## v0.2 scope
 
-Only `init`, `status`, `help`, `version`. Everything else in the spec (`push`, `list`, `claim`, `complete`, `control`, `lock`, `validate`, …) ships incrementally.
+- `init` — create the directory tree (idempotent)
+- `status` — pretty-print the status board
+- `push todo "title" [flags]` — drop a todo into `incoming/`
+- `list todo [--state STATE]` — list todos with filtering
+- `show <id>` — print any artifact by full ID or last-6-char suffix
+- `help`, `version`
+
+Everything else in the spec (`push handoff/approval/review`, `claim`, `complete`, `fail`, `block`, `cancel`, `approve`, `deny`, `reply`, `control …`, `lock …`, `validate`, `sweep`) ships incrementally.
+
+## Examples
+
+```powershell
+josh push todo "Fix flaky test in users.test.ts" --priority p1 --agent codex --label test,users
+josh push todo "Triage CI failures" --priority p0 --verify "pnpm test"
+josh list todo
+josh list todo --state in_progress --priority p0
+josh list todo --state all --json
+josh show 01HXXXX                  # full ID
+josh show ABC123                   # last-6 suffix; warns on collision
+```
 
 ## Exit codes
 
