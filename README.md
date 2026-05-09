@@ -50,6 +50,8 @@ Reuben is a fully-stocked dispatcher (~150 items across 9 layers). Levi is the s
 
 See [MANUAL.md](MANUAL.md) for the axis-by-axis list and folder map.
 
+For everyday operator use — slash command reference, `josh` CLI surface, `~/.josh/` runtime, schemas, scheduler setup, recipes, troubleshooting — see **[USER-MANUAL.md](USER-MANUAL.md)**.
+
 ## How the commands work without modes
 
 The Markdown commands in `commands/` reference skills (e.g. "list directories in `skills/thinking/`"). With zero modes installed, the response will be "no modes available." That's the expected shell behavior — typing `/think foo` will note that `foo` doesn't exist because nothing is installed yet.
