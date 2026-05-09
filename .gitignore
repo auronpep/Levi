@@ -6,3 +6,6 @@ Thumbs.db
 .env.local
 incoming/
 *.tmp
+
+# Local Claude Code state (per-machine)
+.claude/settings.local.json

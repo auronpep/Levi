@@ -5,5 +5,30 @@
   "author": {
     "name": "Levi",
     "url": "https://github.com/VoteWood/Levi"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.js\"",
+            "timeout": 5,
+            "statusMessage": "Loading Levi..."
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/prompt-tracker.js\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
   }
 }
