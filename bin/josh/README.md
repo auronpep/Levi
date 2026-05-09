@@ -103,6 +103,59 @@ josh review <review-id> --verdict request_changes \
 
 Each mutate op uses `fs.renameSync` between state directories as the lock primitive. The rename **is** the lock acquisition — only one agent succeeds, the other gets `ENOENT` and exits cleanly with code 3 (lock-conflict). Read-modify-write happens AFTER the rename, when the agent exclusively owns the file at the new path.
 
+## Operations: hybrid scheduler
+
+The orchestrator runs as **two cooperating schedulers**:
+
+| Layer | What | When | Why |
+|---|---|---|---|
+| **Heartbeat** | Windows Task Scheduler runs `node C:\Levi\bin\josh\josh.js tick` | every 5 min | Mechanical, fast (~50ms), free, independent of any LLM runtime |
+| **Oversight** | OpenClaw cron `levi-orchestrator-oversight` runs an agent that reads `josh status` + `josh validate` and alerts on anomalies | every 1 hour | Intelligent, can react and notify when something looks wrong |
+
+The `tick` lock primitive (`~/.josh/orchestrator/orchestrator.lock`) prevents double-fire if both happen to overlap.
+
+### Heartbeat setup (one PC at a time)
+
+```powershell
+pwsh -NoProfile -File C:\Levi\bin\josh\scripts\register-task-scheduler.ps1
+```
+
+Hidden, interactive logon, 5-minute interval, 1-minute exec timeout. Re-running the script with `-Force` is safe.
+
+To remove: `Unregister-ScheduledTask -TaskName 'josh-tick' -Confirm:$false`
+
+### Oversight setup (one OpenClaw profile)
+
+```powershell
+openclaw --profile <profile> cron add `
+  --name "levi-orchestrator-oversight" `
+  --description "josh runtime oversight - reads status + validate, alerts on anomalies" `
+  --every 1h `
+  --message "Oversight pass for ~/.josh/ runtime. The heartbeat is handled by Windows Task Scheduler — DO NOT run josh tick yourself. Read 'josh status' and 'josh validate' via the exec tool. Stay silent unless: queue.failed > 0, queue.in_progress > 5, any approval older than 4h, any review older than 24h, orchestrator.last_tick older than 15 minutes, or josh validate reports errors. If an anomaly is present, emit ONE short alert (1-3 sentences) describing the most urgent problem, the affected ID or file, and one suggested next step." `
+  --session isolated `
+  --tools exec `
+  --thinking off `
+  --announce `
+  --best-effort-deliver `
+  --light-context `
+  --timeout-seconds 60
+```
+
+The agent uses `--announce` to deliver alert text to the configured channel only when there's an anomaly to report. On clean ticks it stays silent (no LLM cost beyond the `josh status` parse).
+
+### Verification
+
+```powershell
+# Heartbeat fresh?
+josh status                    # last_tick should be within ~5 min
+
+# Last oversight pass?
+openclaw --profile <profile> cron runs --id <oversight-cron-id> --limit 1
+
+# Manual oversight fire (debug)
+openclaw --profile <profile> cron run <oversight-cron-id>
+```
+
 ## Exit codes
 
 Per spec: `0` success, `1` validation, `2` not-found, `3` lock-conflict, `4` filesystem error.
