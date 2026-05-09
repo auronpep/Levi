@@ -209,6 +209,12 @@ function defaultActor() {
   return `cli:${os.userInfo().username}`;
 }
 
+// Every mutate op accepts both --actor and --as. Pick whichever the caller
+// passed (same field, different name; --as reads naturally for claim/complete).
+function resolveActor(values) {
+  return values.actor || values.as || defaultActor();
+}
+
 // ─── Handoff & approval locators ─────────────────────────────────────────────
 
 function locateHandoff(idOrSuffix) {
@@ -1026,8 +1032,9 @@ function cmdClaim(args) {
     parsed = parseArgs({
       args,
       options: {
-        as:  { type: 'string' },
-        ttl: { type: 'string' }
+        as:    { type: 'string' },
+        actor: { type: 'string' },
+        ttl:   { type: 'string' }
       },
       allowPositionals: true,
       strict: true
@@ -1037,7 +1044,7 @@ function cmdClaim(args) {
   const idArg = parsed.positionals[0];
   if (!idArg) return errExit('claim requires <todo-id>', 1);
 
-  const actor = parsed.values.as || defaultActor();
+  const actor = resolveActor(parsed.values);
   const ttlSec = parsed.values.ttl ? parseInt(parsed.values.ttl, 10) : 3600;
   if (!Number.isFinite(ttlSec) || ttlSec < 1 || ttlSec > 86400) {
     return errExit('--ttl must be in [1, 86400] seconds', 1);
@@ -1066,6 +1073,7 @@ function cmdComplete(args) {
     parsed = parseArgs({
       args,
       options: {
+        as:            { type: 'string' },
         actor:         { type: 'string' },
         note:          { type: 'string' },
         'skip-verify': { type: 'boolean' }
@@ -1078,7 +1086,7 @@ function cmdComplete(args) {
   const idArg = parsed.positionals[0];
   if (!idArg) return errExit('complete requires <todo-id>', 1);
 
-  const actor = parsed.values.actor || defaultActor();
+  const actor = resolveActor(parsed.values);
 
   // Locate first so we can run verify before the move.
   const located = locateTodo(idArg, ['in_progress']);
@@ -1123,6 +1131,7 @@ function cmdFail(args) {
     parsed = parseArgs({
       args,
       options: {
+        as:     { type: 'string' },
         actor:  { type: 'string' },
         reason: { type: 'string' }
       },
@@ -1135,7 +1144,7 @@ function cmdFail(args) {
   if (!idArg) return errExit('fail requires <todo-id>', 1);
   const reason = parsed.values.reason;
   if (!reason) return errExit('fail requires --reason "<text>"', 1);
-  const actor = parsed.values.actor || defaultActor();
+  const actor = resolveActor(parsed.values);
 
   const r = transitionTodo({
     srcStates: ['in_progress', 'triaged'],
@@ -1162,6 +1171,7 @@ function cmdBlock(args) {
     parsed = parseArgs({
       args,
       options: {
+        as:           { type: 'string' },
         actor:        { type: 'string' },
         reason:       { type: 'string' },
         'depends-on': { type: 'string' }
@@ -1175,7 +1185,7 @@ function cmdBlock(args) {
   if (!idArg) return errExit('block requires <todo-id>', 1);
   const dependsOn = parsed.values['depends-on'];
   if (!dependsOn) return errExit('block requires --depends-on <other-id>[,<other-id>]', 1);
-  const actor = parsed.values.actor || defaultActor();
+  const actor = resolveActor(parsed.values);
   const newDeps = dependsOn.split(',').map(s => s.trim()).filter(Boolean);
 
   const r = transitionTodo({
@@ -1203,6 +1213,7 @@ function cmdUnblock(args) {
     parsed = parseArgs({
       args,
       options: {
+        as:    { type: 'string' },
         actor: { type: 'string' },
         note:  { type: 'string' }
       },
@@ -1213,7 +1224,7 @@ function cmdUnblock(args) {
 
   const idArg = parsed.positionals[0];
   if (!idArg) return errExit('unblock requires <todo-id>', 1);
-  const actor = parsed.values.actor || defaultActor();
+  const actor = resolveActor(parsed.values);
 
   const r = transitionTodo({
     srcStates: ['blocked'],
@@ -1240,6 +1251,7 @@ function cmdCancel(args) {
     parsed = parseArgs({
       args,
       options: {
+        as:     { type: 'string' },
         actor:  { type: 'string' },
         reason: { type: 'string' }
       },
@@ -1250,7 +1262,7 @@ function cmdCancel(args) {
 
   const idArg = parsed.positionals[0];
   if (!idArg) return errExit('cancel requires <todo-id>', 1);
-  const actor = parsed.values.actor || defaultActor();
+  const actor = resolveActor(parsed.values);
 
   const r = transitionTodo({
     srcStates: ['incoming', 'triaged', 'in_progress', 'blocked'],
@@ -1397,6 +1409,7 @@ function cmdReply(args) {
       options: {
         body:  { type: 'string' },
         kind:  { type: 'string' },
+        as:    { type: 'string' },
         actor: { type: 'string' }
       },
       allowPositionals: true,
@@ -1418,7 +1431,7 @@ function cmdReply(args) {
   if (!HANDOFF_KINDS.includes(replyKind)) {
     return errExit(`--kind must be one of: ${HANDOFF_KINDS.join(', ')}`, 1);
   }
-  const actor = parsed.values.actor || defaultActor();
+  const actor = resolveActor(parsed.values);
 
   // Recipient of the reply = sender of the original. Map to a known agent dir
   // by matching the prefix or exact value.
@@ -1485,6 +1498,7 @@ function cmdAck(args) {
     parsed = parseArgs({
       args,
       options: {
+        as:    { type: 'string' },
         actor: { type: 'string' },
         note:  { type: 'string' }
       },
@@ -1495,7 +1509,7 @@ function cmdAck(args) {
 
   const idArg = parsed.positionals[0];
   if (!idArg) return errExit('ack requires <handoff-id>', 1);
-  const actor = parsed.values.actor || defaultActor();
+  const actor = resolveActor(parsed.values);
 
   const located = locateHandoff(idArg);
   if (located.error) return errExit(located.error, located.code);
@@ -1674,6 +1688,7 @@ function decideApproval(args, decision) {
     parsed = parseArgs({
       args,
       options: {
+        as:     { type: 'string' },
         actor:  { type: 'string' },
         note:   { type: 'string' },
         reason: { type: 'string' }
@@ -1702,7 +1717,7 @@ function decideApproval(args, decision) {
   const approval = readJson(toPath);
   if (!approval) return errExit('malformed approval', 4);
   const now = new Date().toISOString();
-  const actor = parsed.values.actor || defaultActor();
+  const actor = resolveActor(parsed.values);
   approval.decision = decision;
   approval.decided_at = now;
   approval.decided_by = actor;
