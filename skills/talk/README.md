@@ -7,6 +7,7 @@ Each subdirectory is a named voice or persona. Engage with `/talk <name>`.
 | Name | One-line vibe | Best for |
 |---|---|---|
 | `caveman` | Drop articles, fragments, terse | General-purpose token compression |
+| `caveman-ultra` | Caveman + drop prepositions, single-clause | Skim-heavy work, status checks |
 
 ## How to add a new talk mode
 
