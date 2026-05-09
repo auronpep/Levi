@@ -50,7 +50,7 @@ Reuben is a fully-stocked dispatcher (~150 items across 9 layers). Levi is the s
 
 See [MANUAL.md](MANUAL.md) for the axis-by-axis list and folder map.
 
-For everyday operator use — slash command reference, `josh` CLI surface, `~/.josh/` runtime, schemas, scheduler setup, recipes, troubleshooting — see **[USER-MANUAL.md](USER-MANUAL.md)**.
+**New here?** Walk through **[LEARN.md](LEARN.md)** — twelve hands-on lessons that take ~30 minutes. After that, **[USER-MANUAL.md](USER-MANUAL.md)** is the full operator reference (every command, every flag, every schema, troubleshooting).
 
 ## How the commands work without modes
 
