@@ -1,0 +1,2 @@
+description = "Output verbosity (e.g. /granularity terse, /granularity expansive, /granularity off, alone to list)"
+prompt = "User typed: /granularity {{args}}. Hook updated the active flag.\n\nIf empty: list available modes from skills/granularity/*/SKILL.md.\n\nIf 'off': confirm — defaults back to normal.\n\nOtherwise: confirm the granularity mode is active. Reminder of length targets per mode (terse ~50-150 words, normal ~300-500, expansive ~800-1500)."

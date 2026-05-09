@@ -1,0 +1,2 @@
+description = "Engage a fully-structured output template (e.g. /template pr-description, /template off, alone to list)"
+prompt = "User typed: /template {{args}}. Hook updated active flag.\n\nIf empty: list templates from skills/template/*/SKILL.md.\n\nIf 'off': confirm — no template active.\n\nOtherwise: confirm template engaged. Future responses fit the template shape. If a request can't fit, break out for that turn with [switching to prose] then resume."

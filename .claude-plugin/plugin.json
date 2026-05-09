@@ -1,0 +1,9 @@
+{
+  "name": "levi",
+  "version": "0.1.0",
+  "description": "Levi — minimal Claude Code plugin shell. Same axes as Reuben, zero items inside. Add modes, agents, hooks, and reporters one at a time.",
+  "author": {
+    "name": "Levi",
+    "url": "https://github.com/VoteWood/Levi"
+  }
+}

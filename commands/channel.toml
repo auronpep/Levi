@@ -1,0 +1,2 @@
+description = "Reasoning lens (e.g. /channel security, /channel cost, /channel ux, /channel off, alone to list)"
+prompt = "User typed: /channel {{args}}. Hook updated active flag.\n\nIf empty: list available channels from skills/channel/*/SKILL.md.\n\nIf 'off': confirm — no specific lens active.\n\nOtherwise: confirm the channel is active. Reminder: channel narrows reasoning angle (security/cost/ux/performance/reliability/data). Compose with /role for full responsibilities, /depth thorough for explicit weighing through this lens."

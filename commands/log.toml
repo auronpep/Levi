@@ -1,0 +1,2 @@
+description = "Granular append-to-file logging (e.g. /log \"finding\", /log on, /log off)"
+prompt = "User typed: /log {{args}}.\n\nIf empty: cat last 20 lines of <cwd>/.reuben/log.md (or $REUBEN_LOG_FILE).\n\nIf 'on': enable auto-log mode — Stop hook will append a line per turn.\n\nIf 'off': disable auto-log.\n\nOtherwise (a message): append a line to the log file in the format `- **<ISO>** [session:<id-prefix>]: <message>`. Confirm append + show the line written."

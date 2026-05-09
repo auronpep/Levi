@@ -1,0 +1,2 @@
+description = "Output format target (e.g. /format json, /format csv, /format html, /format off, /format alone to list)"
+prompt = "User typed: /format {{args}}. Hook updated the active format flag.\n\nIf {{args}} is empty: list available formats by reading skills/format/*/SKILL.md (skip README). Show name + description.\n\nIf {{args}} is 'off': confirm format disabled (defaults back to markdown).\n\nOtherwise ({{args}} is a format name): confirm the format is active. Note that other axes (style, talk, thinking) still apply within the chosen format."

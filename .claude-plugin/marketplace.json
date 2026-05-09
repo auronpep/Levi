@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "levi-marketplace",
+  "description": "Private marketplace for the Levi shell plugin.",
+  "owner": {
+    "name": "Levi"
+  },
+  "plugins": [
+    {
+      "name": "levi",
+      "description": "Empty shell — 47 axis commands and the folder structure for modes, agents, hooks, and reporters. Add items as you go.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}
