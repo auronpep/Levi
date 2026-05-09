@@ -1,0 +1,13 @@
+{
+  "name": "@levi/josh",
+  "version": "0.1.0",
+  "description": "josh — CLI for the ~/.josh/ shared agent runtime. Implements the spec at ~/.josh/README.md.",
+  "bin": {
+    "josh": "josh.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "type": "commonjs",
+  "license": "MIT"
+}
