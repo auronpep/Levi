@@ -2,7 +2,7 @@
 // josh — CLI for the ~/.josh/ shared agent runtime.
 // Spec: ~/.josh/README.md
 //
-// v0.4.0 commands:
+// v0.5.0 commands:
 //   josh init                — create the directory tree + initial status.json (idempotent)
 //   josh status              — pretty-print status.json
 //   josh push todo "title"   — drop a todo into incoming/
@@ -16,6 +16,14 @@
 //   josh block <id>          — in_progress|triaged → blocked (requires --depends-on)
 //   josh unblock <id>        — blocked → triaged
 //   josh cancel <id>         — any live state → cancelled
+//   josh push handoff        — drop a message in another agent's incoming/
+//   josh reply <id>          — answer a handoff; moves original to processed/
+//   josh ack <id>            — mark a handoff handled without replying
+//   josh list handoffs       — list handoffs (per agent, by state)
+//   josh push approval       — request human-gated decision
+//   josh approve <id>        — pending → done (decision=approve)
+//   josh deny <id>           — pending → done (decision=deny)
+//   josh list approvals      — list pending/done approvals
 //
 // Exit codes per spec: 0 success, 1 validation, 2 not-found, 3 lock-conflict, 4 fs-error.
 
@@ -32,9 +40,12 @@ const JOSH_ROOT = process.env.JOSH_ROOT || path.join(os.homedir(), '.josh');
 const SUBDIRS = [
   'claude/incoming',
   'claude/outgoing',
+  'claude/processed',
   'codex/incoming',
   'codex/outgoing',
+  'codex/processed',
   'orchestrator/incoming',
+  'orchestrator/processed',
   'todo/incoming',
   'todo/triaged',
   'todo/in_progress',
@@ -50,6 +61,9 @@ const SUBDIRS = [
   'audit',
   'shared'
 ];
+
+const KNOWN_AGENTS = ['claude', 'codex', 'orchestrator'];
+const HANDOFF_KINDS = ['request', 'answer', 'note'];
 
 const VALID_PRIORITIES = ['p0', 'p1', 'p2', 'p3'];
 
@@ -193,6 +207,44 @@ function findById(id) {
 function defaultActor() {
   if (process.env.JOSH_ACTOR) return process.env.JOSH_ACTOR;
   return `cli:${os.userInfo().username}`;
+}
+
+// ─── Handoff & approval locators ─────────────────────────────────────────────
+
+function locateHandoff(idOrSuffix) {
+  const found = findById(idOrSuffix);
+  if (!found) return { error: 'not found', code: 2 };
+  const rel = found.relative.replace(/\\/g, '/');
+  const parts = rel.split('/');
+  if (parts.length !== 3) return { error: `not an agent-inbox path: ${rel}`, code: 1 };
+  const [agent, state, file] = parts;
+  if (!KNOWN_AGENTS.includes(agent)) return { error: `not in an agent dir: ${rel}`, code: 1 };
+  if (!['incoming', 'processed'].includes(state)) {
+    return { error: `expected agent/incoming or agent/processed, got: ${rel}`, code: 1 };
+  }
+  return {
+    path: found.path,
+    agent,
+    state,
+    id: file.replace(/\.json$/, ''),
+    relative: rel
+  };
+}
+
+function locateApproval(idOrSuffix) {
+  const found = findById(idOrSuffix);
+  if (!found) return { error: 'not found', code: 2 };
+  const rel = found.relative.replace(/\\/g, '/');
+  const parts = rel.split('/');
+  if (parts.length !== 3 || parts[0] !== 'approvals') {
+    return { error: `not an approval: ${rel}`, code: 1 };
+  }
+  return {
+    path: found.path,
+    state: parts[1],
+    id: parts[2].replace(/\.json$/, ''),
+    relative: rel
+  };
 }
 
 // ─── Mutate-op helpers ───────────────────────────────────────────────────────
@@ -549,10 +601,12 @@ function cmdPush(args) {
   }
   const subArgs = args.slice(1);
   switch (subtype) {
-    case 'todo': return cmdPushTodo(subArgs);
+    case 'todo':     return cmdPushTodo(subArgs);
+    case 'handoff':  return cmdPushHandoff(subArgs);
+    case 'approval': return cmdPushApproval(subArgs);
     default:
       err(`unknown artifact type: ${subtype}`);
-      err(`supported in v0.2: todo (handoff/approval/review coming next)`);
+      err(`supported: todo, handoff, approval (review coming next)`);
       return 1;
   }
 }
@@ -659,10 +713,14 @@ function cmdList(args) {
   }
   const subArgs = args.slice(1);
   switch (subtype) {
-    case 'todo': return cmdListTodo(subArgs);
+    case 'todo':      return cmdListTodo(subArgs);
+    case 'handoffs':
+    case 'handoff':   return cmdListHandoffs(subArgs);
+    case 'approvals':
+    case 'approval':  return cmdListApprovals(subArgs);
     default:
       err(`unknown artifact type: ${subtype}`);
-      err(`supported in v0.2: todo`);
+      err(`supported: todo, handoff(s), approval(s)`);
       return 1;
   }
 }
@@ -1214,6 +1272,521 @@ function cmdCancel(args) {
   return 0;
 }
 
+// ─── Handoff: push, reply, ack, list ─────────────────────────────────────────
+
+function cmdPushHandoff(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        to:                  { type: 'string' },
+        kind:                { type: 'string' },
+        title:               { type: 'string' },
+        body:                { type: 'string' },
+        'reply-to':          { type: 'string' },
+        priority:            { type: 'string' },
+        'expects-reply-by':  { type: 'string' },
+        'context-files':     { type: 'string' },
+        from:                { type: 'string' }
+      },
+      allowPositionals: true,
+      strict: true
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const v = parsed.values;
+  if (!v.to) return errExit('--to <agent> required (claude|codex|orchestrator)', 1);
+  if (!KNOWN_AGENTS.includes(v.to)) {
+    return errExit(`--to must be one of: ${KNOWN_AGENTS.join(', ')}`, 1);
+  }
+  if (!v.title) return errExit('--title "<text>" required', 1);
+  if (!v.body) return errExit('--body "<text>" required', 1);
+
+  const kind = v.kind || 'request';
+  if (!HANDOFF_KINDS.includes(kind)) {
+    return errExit(`--kind must be one of: ${HANDOFF_KINDS.join(', ')}`, 1);
+  }
+
+  const priority = v.priority || 'p2';
+  if (!VALID_PRIORITIES.includes(priority)) {
+    return errExit(`invalid priority '${priority}'. allowed: ${VALID_PRIORITIES.join(', ')}`, 1);
+  }
+
+  const id = ulid();
+  let threadId = id;
+  let replyTo = null;
+  if (v['reply-to']) {
+    const orig = locateHandoff(v['reply-to']);
+    if (orig.error) return errExit(`--reply-to ${v['reply-to']}: ${orig.error}`, orig.code);
+    const origData = readJson(orig.path);
+    if (!origData) return errExit(`--reply-to ${v['reply-to']}: malformed`, 1);
+    threadId = origData.thread_id || origData.id;
+    replyTo = origData.id;
+  }
+
+  const from = v.from || defaultActor();
+  const now = new Date().toISOString();
+  const handoff = {
+    schema: 1,
+    id,
+    thread_id: threadId,
+    reply_to: replyTo,
+    from,
+    to: v.to,
+    kind,
+    title: v.title,
+    body: v.body,
+    context_files: v['context-files']
+      ? v['context-files'].split(',').map(s => s.trim()).filter(Boolean)
+      : [],
+    created_at: now,
+    expects_reply_by: v['expects-reply-by'] || null,
+    priority,
+    history: [{ at: now, actor: from, event: 'sent' }]
+  };
+
+  const dir = path.join(JOSH_ROOT, v.to, 'incoming');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const filepath = path.join(dir, `${id}.json`);
+  writeJsonAtomic(filepath, handoff);
+
+  appendAudit({
+    actor: from,
+    action: 'handoff.sent',
+    id,
+    details: { to: v.to, kind, thread_id: threadId, reply_to: replyTo, title: v.title }
+  });
+
+  log(id);
+  return 0;
+}
+
+function moveHandoffToProcessed(located, processedBy, eventName, eventDetails) {
+  // Atomic move incoming → processed within the same agent's dir.
+  if (located.state === 'processed') return { code: 0, alreadyProcessed: true };
+  const fromPath = located.path;
+  const toPath = path.join(JOSH_ROOT, located.agent, 'processed', `${located.id}.json`);
+  // Ensure processed/ exists.
+  const procDir = path.dirname(toPath);
+  if (!fs.existsSync(procDir)) fs.mkdirSync(procDir, { recursive: true });
+
+  try { fs.renameSync(fromPath, toPath); }
+  catch (e) {
+    if (e.code === 'ENOENT') return { code: 3, error: `handoff no longer in ${located.state} (race?)` };
+    throw e;
+  }
+
+  const handoff = readJson(toPath);
+  if (handoff) {
+    handoff.history = handoff.history || [];
+    const now = new Date().toISOString();
+    handoff.history.push({ at: now, actor: processedBy, event: eventName, details: eventDetails || {} });
+    handoff.processed_at = now;
+    handoff.processed_by = processedBy;
+    writeJsonAtomic(toPath, handoff);
+  }
+  return { code: 0, handoff, toPath };
+}
+
+function cmdReply(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        body:  { type: 'string' },
+        kind:  { type: 'string' },
+        actor: { type: 'string' }
+      },
+      allowPositionals: true,
+      strict: true
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const idArg = parsed.positionals[0];
+  if (!idArg) return errExit('reply requires <handoff-id>', 1);
+  if (!parsed.values.body) return errExit('--body "<text>" required', 1);
+
+  const located = locateHandoff(idArg);
+  if (located.error) return errExit(located.error, located.code);
+
+  const orig = readJson(located.path);
+  if (!orig) return errExit(`malformed handoff at ${located.relative}`, 4);
+
+  const replyKind = parsed.values.kind || 'answer';
+  if (!HANDOFF_KINDS.includes(replyKind)) {
+    return errExit(`--kind must be one of: ${HANDOFF_KINDS.join(', ')}`, 1);
+  }
+  const actor = parsed.values.actor || defaultActor();
+
+  // Recipient of the reply = sender of the original. Map to a known agent dir
+  // by matching the prefix or exact value.
+  const origFrom = (orig.from || '').toString();
+  let recipientDir = null;
+  for (const a of KNOWN_AGENTS) {
+    if (origFrom === a || origFrom.startsWith(a + ':') ||
+        origFrom.startsWith(a + '-code:') || origFrom === a + '-code') {
+      recipientDir = a;
+      break;
+    }
+  }
+  if (!recipientDir) {
+    // Heuristic: if from matches "claude-code…" route to claude/.
+    if (/^claude/i.test(origFrom)) recipientDir = 'claude';
+    else if (/^codex/i.test(origFrom)) recipientDir = 'codex';
+    else return errExit(`cannot route reply: original 'from' is "${origFrom}", not a known agent`, 1);
+  }
+
+  // Build reply handoff.
+  const id = ulid();
+  const now = new Date().toISOString();
+  const reply = {
+    schema: 1,
+    id,
+    thread_id: orig.thread_id || orig.id,
+    reply_to: orig.id,
+    from: actor,
+    to: recipientDir,
+    kind: replyKind,
+    title: `Re: ${orig.title || ''}`.slice(0, 200),
+    body: parsed.values.body,
+    context_files: [],
+    created_at: now,
+    expects_reply_by: null,
+    priority: orig.priority || 'p2',
+    history: [{ at: now, actor, event: 'sent', details: { reply_to: orig.id } }]
+  };
+
+  const replyDir = path.join(JOSH_ROOT, recipientDir, 'incoming');
+  if (!fs.existsSync(replyDir)) fs.mkdirSync(replyDir, { recursive: true });
+  writeJsonAtomic(path.join(replyDir, `${id}.json`), reply);
+
+  appendAudit({
+    actor,
+    action: 'handoff.replied',
+    id,
+    details: { thread_id: reply.thread_id, reply_to: orig.id, to: recipientDir, kind: replyKind }
+  });
+
+  // Move original from incoming → processed (only if it WAS in incoming).
+  const moveResult = moveHandoffToProcessed(located, actor, 'replied', { reply_id: id });
+  if (moveResult.error) {
+    err(`warn: ${moveResult.error} (reply was still sent)`);
+  }
+
+  log(id);
+  return 0;
+}
+
+function cmdAck(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        actor: { type: 'string' },
+        note:  { type: 'string' }
+      },
+      allowPositionals: true,
+      strict: true
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const idArg = parsed.positionals[0];
+  if (!idArg) return errExit('ack requires <handoff-id>', 1);
+  const actor = parsed.values.actor || defaultActor();
+
+  const located = locateHandoff(idArg);
+  if (located.error) return errExit(located.error, located.code);
+  if (located.state === 'processed') return errExit('already processed', 1);
+
+  const r = moveHandoffToProcessed(located, actor, 'acked',
+    parsed.values.note ? { note: parsed.values.note } : {});
+  if (r.error) return errExit(r.error, r.code);
+
+  appendAudit({
+    actor,
+    action: 'handoff.acked',
+    id: located.id,
+    details: parsed.values.note ? { note: parsed.values.note } : {}
+  });
+
+  log(located.id);
+  return 0;
+}
+
+function cmdListHandoffs(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        for:   { type: 'string' },
+        state: { type: 'string' },
+        json:  { type: 'boolean' }
+      },
+      allowPositionals: false,
+      strict: true
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const agents = parsed.values.for
+    ? [parsed.values.for]
+    : KNOWN_AGENTS;
+  for (const a of agents) {
+    if (!KNOWN_AGENTS.includes(a)) {
+      return errExit(`--for must be one of: ${KNOWN_AGENTS.join(', ')}`, 1);
+    }
+  }
+  const states = parsed.values.state
+    ? (parsed.values.state === 'all' ? ['incoming', 'processed'] : [parsed.values.state])
+    : ['incoming'];
+  for (const s of states) {
+    if (!['incoming', 'processed'].includes(s)) {
+      return errExit(`--state must be incoming, processed, or all`, 1);
+    }
+  }
+
+  const items = [];
+  for (const agent of agents) {
+    for (const state of states) {
+      const dir = path.join(JOSH_ROOT, agent, state);
+      let files;
+      try { files = fs.readdirSync(dir).filter(f => f.endsWith('.json')); } catch (e) { continue; }
+      for (const f of files) {
+        const h = readJson(path.join(dir, f));
+        if (!h) continue;
+        items.push({ ...h, _agent: agent, _state: state });
+      }
+    }
+  }
+
+  // Sort: priority desc, then created_at asc
+  const rank = { p0: 0, p1: 1, p2: 2, p3: 3 };
+  items.sort((a, b) => {
+    const pa = rank[a.priority] ?? 99, pb = rank[b.priority] ?? 99;
+    if (pa !== pb) return pa - pb;
+    return (a.created_at || '').localeCompare(b.created_at || '');
+  });
+
+  if (parsed.values.json) {
+    log(JSON.stringify(items, null, 2));
+    return 0;
+  }
+  if (items.length === 0) {
+    log('(no handoffs match)');
+    return 0;
+  }
+
+  log(`id (last 6)  for          state      kind     pri  age      from              title`);
+  log(`-----------  -----------  ---------  -------  ---  -------  ----------------  --------------------`);
+  for (const h of items) {
+    const idShort = (h.id || '').slice(-6);
+    const forA = (h._agent || '').padEnd(11);
+    const state = (h._state || '').padEnd(9);
+    const kind = (h.kind || '').padEnd(7);
+    const pri = (h.priority || '').padEnd(3);
+    const age = formatAge(h.created_at).padEnd(7);
+    const from = (h.from || '').slice(0, 16).padEnd(16);
+    const title = (h.title || '').slice(0, 50);
+    log(`${idShort}       ${forA}  ${state}  ${kind}  ${pri}  ${age}  ${from}  ${title}`);
+  }
+  return 0;
+}
+
+// ─── Approval: push, list, approve, deny ─────────────────────────────────────
+
+function cmdPushApproval(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        summary:           { type: 'string' },
+        details:           { type: 'string' },
+        options:           { type: 'string' },           // comma-separated, default: approve,deny
+        'default-after':   { type: 'string' },           // human-friendly: 2h, 30m, 60
+        'default-choice':  { type: 'string' },           // default: deny
+        requester:         { type: 'string' }
+      },
+      allowPositionals: true,
+      strict: true
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const v = parsed.values;
+  if (!v.summary && parsed.positionals.length === 0) {
+    return errExit('approval requires --summary "<text>" or a positional summary', 1);
+  }
+  const summary = v.summary || parsed.positionals.join(' ').trim();
+  const opts = (v.options || 'approve,deny').split(',').map(s => s.trim()).filter(Boolean);
+  if (opts.length < 2) return errExit('--options must list at least 2 choices', 1);
+  const defaultChoice = v['default-choice'] || 'deny';
+  if (!opts.includes(defaultChoice)) {
+    return errExit(`--default-choice must be one of: ${opts.join(', ')}`, 1);
+  }
+
+  let defaultAfterSec = null;
+  if (v['default-after']) {
+    const m = v['default-after'].match(/^(\d+)\s*(s|m|h|d)?$/i);
+    if (!m) return errExit('--default-after format: <n>[s|m|h|d] (e.g. 30m, 2h)', 1);
+    const n = parseInt(m[1], 10);
+    const unit = (m[2] || 's').toLowerCase();
+    const mult = { s: 1, m: 60, h: 3600, d: 86400 }[unit];
+    defaultAfterSec = n * mult;
+  }
+
+  const id = ulid();
+  const now = new Date().toISOString();
+  const requester = v.requester || defaultActor();
+  const approval = {
+    schema: 1,
+    id,
+    created_at: now,
+    requester,
+    summary,
+    details: v.details || '',
+    options: opts,
+    default_after_sec: defaultAfterSec,
+    default_choice: defaultChoice,
+    history: [{ at: now, actor: requester, event: 'requested' }]
+  };
+
+  const dir = path.join(JOSH_ROOT, 'approvals', 'pending');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  writeJsonAtomic(path.join(dir, `${id}.json`), approval);
+
+  appendAudit({
+    actor: requester,
+    action: 'approval.requested',
+    id,
+    details: { summary, options: opts, default_after_sec: defaultAfterSec }
+  });
+
+  log(id);
+  return 0;
+}
+
+function decideApproval(args, decision) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        actor:  { type: 'string' },
+        note:   { type: 'string' },
+        reason: { type: 'string' }
+      },
+      allowPositionals: true,
+      strict: true
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const idArg = parsed.positionals[0];
+  if (!idArg) return errExit(`${decision} requires <approval-id>`, 1);
+
+  const located = locateApproval(idArg);
+  if (located.error) return errExit(located.error, located.code);
+  if (located.state !== 'pending') return errExit(`approval already ${located.state}`, 1);
+
+  const fromPath = located.path;
+  const toPath = path.join(JOSH_ROOT, 'approvals', 'done', `${located.id}.json`);
+
+  try { fs.renameSync(fromPath, toPath); }
+  catch (e) {
+    if (e.code === 'ENOENT') return errExit('approval no longer pending (race?)', 3);
+    throw e;
+  }
+
+  const approval = readJson(toPath);
+  if (!approval) return errExit('malformed approval', 4);
+  const now = new Date().toISOString();
+  const actor = parsed.values.actor || defaultActor();
+  approval.decision = decision;
+  approval.decided_at = now;
+  approval.decided_by = actor;
+  if (parsed.values.note) approval.decision_note = parsed.values.note;
+  if (parsed.values.reason) approval.decision_reason = parsed.values.reason;
+  approval.history = approval.history || [];
+  approval.history.push({
+    at: now,
+    actor,
+    event: 'decided',
+    details: { decision, ...(parsed.values.note ? { note: parsed.values.note } : {}), ...(parsed.values.reason ? { reason: parsed.values.reason } : {}) }
+  });
+  writeJsonAtomic(toPath, approval);
+
+  appendAudit({
+    actor,
+    action: 'approval.decided',
+    id: located.id,
+    details: { decision, ...(parsed.values.note ? { note: parsed.values.note } : {}), ...(parsed.values.reason ? { reason: parsed.values.reason } : {}) }
+  });
+
+  log(located.id);
+  return 0;
+}
+
+function cmdApprove(args) { return decideApproval(args, 'approve'); }
+function cmdDeny(args)    { return decideApproval(args, 'deny'); }
+
+function cmdListApprovals(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        state: { type: 'string' },
+        json:  { type: 'boolean' }
+      },
+      allowPositionals: false,
+      strict: true
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const states = parsed.values.state
+    ? (parsed.values.state === 'all' ? ['pending', 'done'] : [parsed.values.state])
+    : ['pending'];
+  for (const s of states) {
+    if (!['pending', 'done'].includes(s)) {
+      return errExit(`--state must be pending, done, or all`, 1);
+    }
+  }
+
+  const items = [];
+  for (const state of states) {
+    const dir = path.join(JOSH_ROOT, 'approvals', state);
+    let files;
+    try { files = fs.readdirSync(dir).filter(f => f.endsWith('.json')); } catch (e) { continue; }
+    for (const f of files) {
+      const a = readJson(path.join(dir, f));
+      if (!a) continue;
+      items.push({ ...a, _state: state });
+    }
+  }
+  items.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+
+  if (parsed.values.json) {
+    log(JSON.stringify(items, null, 2));
+    return 0;
+  }
+  if (items.length === 0) { log('(no approvals match)'); return 0; }
+
+  log(`id (last 6)  state    age      decision   requester              summary`);
+  log(`-----------  -------  -------  ---------  ---------------------  ------------------------`);
+  for (const a of items) {
+    const idShort = (a.id || '').slice(-6);
+    const state = (a._state || '').padEnd(7);
+    const age = formatAge(a.created_at).padEnd(7);
+    const decision = (a.decision || '—').padEnd(9);
+    const req = (a.requester || '').slice(0, 21).padEnd(21);
+    const summary = (a.summary || '').slice(0, 50);
+    log(`${idShort}       ${state}  ${age}  ${decision}  ${req}  ${summary}`);
+  }
+  return 0;
+}
+
 function cmdHelp() {
   log(`josh — CLI for the ~/.josh/ shared agent runtime`);
   log(``);
@@ -1237,6 +1810,20 @@ function cmdHelp() {
   log(`         [--reason "..."]`);
   log(`  unblock <id> [--note "..."]             blocked → triaged`);
   log(`  cancel <id> [--reason "..."]            any live state → cancelled`);
+  log(``);
+  log(`handoffs (cross-agent messaging):`);
+  log(`  push handoff --to AGENT --title "..." --body "..." [--kind request|answer|note]`);
+  log(`         [--reply-to ID] [--priority pX] [--from ACTOR]`);
+  log(`  list handoffs [--for AGENT] [--state incoming|processed|all]`);
+  log(`  reply <handoff-id> --body "..." [--kind answer|note] [--actor X]`);
+  log(`  ack <handoff-id> [--note "..."]         move incoming → processed`);
+  log(``);
+  log(`approvals (human-gated decisions):`);
+  log(`  push approval --summary "..." [--details "..."] [--options approve,deny]`);
+  log(`         [--default-after 2h] [--default-choice deny]`);
+  log(`  list approvals [--state pending|done|all]`);
+  log(`  approve <approval-id> [--note "..."]`);
+  log(`  deny <approval-id> [--reason "..."]`);
   log(``);
   log(`  help                          show this message`);
   log(`  version                       show CLI version`);
@@ -1290,6 +1877,10 @@ const COMMANDS = {
   block: cmdBlock,
   unblock: cmdUnblock,
   cancel: cmdCancel,
+  reply: cmdReply,
+  ack: cmdAck,
+  approve: cmdApprove,
+  deny: cmdDeny,
   help: cmdHelp,
   '--help': cmdHelp,
   '-h': cmdHelp,

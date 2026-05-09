@@ -32,23 +32,17 @@ josh help        # list commands
 | `JOSH_ROOT` | `~/.josh` | Override the runtime root. Useful for tests. |
 | `JOSH_DEBUG` | unset | When set, print stack traces on error. |
 
-## v0.4 scope
+## v0.5 scope
 
-Producer + observer + orchestrator + agent mutate ops:
+Full producer/observer/orchestrator/agent surface plus cross-agent handoffs and approvals:
 
 - `init` / `status` / `help` / `version`
-- `push todo "title" [flags]` — drop into `incoming/`
-- `list todo [filters]` / `show <id>` — read views
-- `tick [--verbose]` — one orchestrator heartbeat (cron driver)
-- `control <action>` — pause, resume, drain, undrain, sweep-now, set-interval, reorder
-- `claim <id>` — `triaged → in_progress` (atomic, sets claim TTL)
-- `complete <id>` — `in_progress → done` (runs verify command if defined)
-- `fail <id> --reason "..."` — `in_progress|triaged → failed`
-- `block <id> --depends-on <ids>` — `in_progress|triaged → blocked`
-- `unblock <id>` — `blocked → triaged`
-- `cancel <id>` — any live state → `cancelled`
+- **Todo**: `push todo`, `list todo`, `show <id>`, `claim`, `complete`, `fail`, `block`, `unblock`, `cancel`
+- **Orchestrator**: `tick`, `control <action>`
+- **Handoffs** (cross-agent messaging): `push handoff`, `list handoffs`, `reply`, `ack`
+- **Approvals** (human-gated decisions): `push approval`, `list approvals`, `approve`, `deny`
 
-Future (v0.5+): `push handoff/approval/review`, `approve`, `deny`, `reply`, `lock acquire/release`, `validate`.
+Future (v0.6+): `push review` + reviewer flow, `lock acquire/release`, `validate` (schema check), shared dossier helpers.
 
 ## Examples
 
@@ -76,6 +70,22 @@ josh tick --verbose --force        # debug: ignore lock, multi-line output
 josh control pause
 josh control reorder ABC123 --priority p0
 josh control set-interval 60
+
+# Cross-agent handoffs (Claude Code ↔ Codex ↔ Orchestrator)
+josh push handoff --to codex --title "What's the right type sig?" \
+  --body "..." --kind request --priority p1
+josh list handoffs --for codex                    # codex's incoming
+josh list handoffs --for codex --state processed  # things codex already handled
+josh reply <handoff-id> --body "Use Result<T, E>" --kind answer
+josh ack <handoff-id> --note "applied the suggestion"
+
+# Approvals (human-gated)
+josh push approval --summary "Push 3 commits to main?" \
+  --details "feat(...), fix(...), fix(...). Tests passed locally." \
+  --default-after 2h --default-choice deny
+josh list approvals
+josh approve <approval-id> --note "ok"
+josh deny <approval-id> --reason "wait for review on PR #12"
 ```
 
 ## Atomic state transitions
