@@ -2,12 +2,14 @@
 // josh — CLI for the ~/.josh/ shared agent runtime.
 // Spec: ~/.josh/README.md
 //
-// v0.2.0 commands:
+// v0.3.0 commands:
 //   josh init                — create the directory tree + initial status.json (idempotent)
 //   josh status              — pretty-print status.json
 //   josh push todo "title"   — drop a todo into incoming/
 //   josh list todo           — list todos with filtering
 //   josh show <id>           — print any artifact by ID (full or last-6 suffix)
+//   josh tick                — one orchestrator heartbeat (intended for cron)
+//   josh control <action>    — send a control command to the orchestrator
 //
 // Exit codes per spec: 0 success, 1 validation, 2 not-found, 3 lock-conflict, 4 fs-error.
 
@@ -185,6 +187,222 @@ function findById(id) {
 function defaultActor() {
   if (process.env.JOSH_ACTOR) return process.env.JOSH_ACTOR;
   return `cli:${os.userInfo().username}`;
+}
+
+// ─── Orchestrator helpers ────────────────────────────────────────────────────
+
+const DEFAULT_INTERVAL_SEC = 300;
+const PAUSED_FLAG  = () => path.join(JOSH_ROOT, 'orchestrator', '.paused');
+const DRAIN_FLAG   = () => path.join(JOSH_ROOT, 'orchestrator', '.draining');
+const LOCK_PATH    = () => path.join(JOSH_ROOT, 'orchestrator', 'orchestrator.lock');
+
+function readStatus() {
+  return readJson(path.join(JOSH_ROOT, 'status.json')) || emptyStatus();
+}
+
+function writeStatus(status) {
+  writeJsonAtomic(path.join(JOSH_ROOT, 'status.json'), status);
+}
+
+function getInterval() {
+  const s = readStatus();
+  return s.agents?.orchestrator?.interval_sec || DEFAULT_INTERVAL_SEC;
+}
+
+function lockAcquire() {
+  // Atomic create-if-not-exists. Returns true on success, false if held.
+  const lockFile = LOCK_PATH();
+  const interval = getInterval();
+  const lockTtlMs = interval * 2 * 1000;
+  const now = Date.now();
+
+  // Stale-lock check (best-effort, then atomic-write).
+  if (fs.existsSync(lockFile)) {
+    const existing = readJson(lockFile);
+    if (existing && existing.acquired_at) {
+      const age = now - new Date(existing.acquired_at).getTime();
+      if (age < lockTtlMs) return false; // fresh lock held by another tick
+    }
+    // Stale or unparseable; remove and try to acquire.
+    try { fs.unlinkSync(lockFile); } catch (e) { /* race: someone else removed */ }
+  }
+
+  try {
+    fs.writeFileSync(
+      lockFile,
+      JSON.stringify({
+        pid: process.pid,
+        acquired_at: new Date(now).toISOString(),
+        host: os.hostname()
+      }, null, 2),
+      { flag: 'wx', mode: 0o600 }
+    );
+    return true;
+  } catch (e) {
+    // EEXIST means another tick won the race
+    return false;
+  }
+}
+
+function lockRelease() {
+  try { fs.unlinkSync(LOCK_PATH()); } catch (e) { /* already gone */ }
+}
+
+function isPaused()   { return fs.existsSync(PAUSED_FLAG()); }
+function isDraining() { return fs.existsSync(DRAIN_FLAG()); }
+
+function listJsonIn(dir) {
+  try {
+    return fs.readdirSync(dir)
+      .filter(f => f.endsWith('.json') && !f.endsWith('.tmp'))
+      .map(f => ({ path: path.join(dir, f), name: f }));
+  } catch (e) { return []; }
+}
+
+function moveTodo(fromPath, toState, todo) {
+  const id = todo.id;
+  const toPath = path.join(JOSH_ROOT, 'todo', toState, `${id}.json`);
+  // Re-write with updated history, then atomic rename
+  writeJsonAtomic(fromPath, todo);
+  fs.renameSync(fromPath, toPath);
+}
+
+function triageOne(file, opts) {
+  const todo = readJson(file.path);
+  if (!todo) {
+    err(`warn: skipping malformed ${file.path}; moving to failed/`);
+    const failedPath = path.join(JOSH_ROOT, 'todo', 'failed', file.name);
+    try { fs.renameSync(file.path, failedPath); } catch (e) {}
+    appendAudit({ actor: 'orchestrator', action: 'todo.malformed', id: file.name, details: {} });
+    return { result: 'malformed' };
+  }
+  const now = new Date().toISOString();
+  todo.history = todo.history || [];
+  todo.history.push({ at: now, actor: 'orchestrator', event: 'triaged' });
+  moveTodo(file.path, 'triaged', todo);
+  appendAudit({
+    actor: 'orchestrator',
+    action: 'todo.triaged',
+    id: todo.id,
+    details: { agent: todo.agent, priority: todo.priority }
+  });
+  return { result: 'triaged', id: todo.id };
+}
+
+function sweepStaleClaims(opts) {
+  let swept = 0;
+  const dir = path.join(JOSH_ROOT, 'todo', 'in_progress');
+  for (const file of listJsonIn(dir)) {
+    const todo = readJson(file.path);
+    if (!todo) continue;
+    if (!todo.claim || !todo.claim.at || !todo.claim.ttl_sec) continue;
+    const claimAt = new Date(todo.claim.at).getTime();
+    const expiresAt = claimAt + todo.claim.ttl_sec * 1000;
+    if (Date.now() < expiresAt) continue;
+    // Stale: move back to triaged with claim cleared.
+    const previousHolder = todo.claim.by;
+    const previousTtl = todo.claim.ttl_sec;
+    todo.claim = null;
+    todo.history = todo.history || [];
+    todo.history.push({
+      at: new Date().toISOString(),
+      actor: 'orchestrator',
+      event: 'claim_expired',
+      details: { previous_holder: previousHolder, ttl_sec: previousTtl }
+    });
+    moveTodo(file.path, 'triaged', todo);
+    appendAudit({
+      actor: 'orchestrator',
+      action: 'todo.claim_expired',
+      id: todo.id,
+      details: { previous_holder: previousHolder, ttl_sec: previousTtl }
+    });
+    swept++;
+  }
+  return swept;
+}
+
+function processControlOne(file) {
+  const ctrl = readJson(file.path);
+  // Always remove the file, even on parse error.
+  try { fs.unlinkSync(file.path); } catch (e) {}
+  if (!ctrl || !ctrl.action) {
+    appendAudit({ actor: 'orchestrator', action: 'control.malformed', id: file.name, details: {} });
+    return;
+  }
+  const action = ctrl.action;
+  switch (action) {
+    case 'pause':
+      try { fs.writeFileSync(PAUSED_FLAG(), new Date().toISOString()); } catch (e) {}
+      appendAudit({ actor: 'orchestrator', action: 'control.paused', id: ctrl.id, details: {} });
+      return;
+    case 'resume':
+      try { fs.unlinkSync(PAUSED_FLAG()); } catch (e) {}
+      appendAudit({ actor: 'orchestrator', action: 'control.resumed', id: ctrl.id, details: {} });
+      return;
+    case 'drain':
+      try { fs.writeFileSync(DRAIN_FLAG(), new Date().toISOString()); } catch (e) {}
+      appendAudit({ actor: 'orchestrator', action: 'control.draining', id: ctrl.id, details: {} });
+      return;
+    case 'undrain':
+      try { fs.unlinkSync(DRAIN_FLAG()); } catch (e) {}
+      appendAudit({ actor: 'orchestrator', action: 'control.undrained', id: ctrl.id, details: {} });
+      return;
+    case 'sweep_now':
+      // Already swept by main tick; nothing to do here.
+      appendAudit({ actor: 'orchestrator', action: 'control.sweep_now', id: ctrl.id, details: {} });
+      return;
+    case 'set_interval': {
+      const sec = parseInt(ctrl.interval_sec, 10);
+      if (!Number.isFinite(sec) || sec < 10 || sec > 86400) {
+        appendAudit({ actor: 'orchestrator', action: 'control.invalid', id: ctrl.id, details: { reason: 'interval out of range', value: ctrl.interval_sec } });
+        return;
+      }
+      const status = readStatus();
+      status.agents.orchestrator.interval_sec = sec;
+      writeStatus(status);
+      appendAudit({ actor: 'orchestrator', action: 'control.set_interval', id: ctrl.id, details: { interval_sec: sec } });
+      return;
+    }
+    case 'reorder': {
+      // Find the todo by id and update priority. Search all live states.
+      const todoId = ctrl.todo_id;
+      const newPri = ctrl.new_priority;
+      if (!todoId || !VALID_PRIORITIES.includes(newPri)) {
+        appendAudit({ actor: 'orchestrator', action: 'control.invalid', id: ctrl.id, details: { reason: 'bad reorder args' } });
+        return;
+      }
+      let touched = false;
+      for (const state of ['incoming', 'triaged', 'blocked']) {
+        const filePath = path.join(JOSH_ROOT, 'todo', state, `${todoId}.json`);
+        if (!fs.existsSync(filePath)) continue;
+        const todo = readJson(filePath);
+        if (!todo) continue;
+        const oldPri = todo.priority;
+        todo.priority = newPri;
+        todo.history.push({ at: new Date().toISOString(), actor: 'orchestrator', event: 'reordered', details: { from: oldPri, to: newPri } });
+        writeJsonAtomic(filePath, todo);
+        touched = true;
+        appendAudit({ actor: 'orchestrator', action: 'todo.reordered', id: todoId, details: { from: oldPri, to: newPri } });
+        break;
+      }
+      if (!touched) {
+        appendAudit({ actor: 'orchestrator', action: 'control.invalid', id: ctrl.id, details: { reason: 'todo not found in live states', todo_id: todoId } });
+      }
+      return;
+    }
+    default:
+      appendAudit({ actor: 'orchestrator', action: 'control.unknown', id: ctrl.id, details: { action } });
+  }
+}
+
+function processAllControls() {
+  let count = 0;
+  for (const f of listJsonIn(path.join(JOSH_ROOT, 'orchestrator', 'incoming'))) {
+    processControlOne(f);
+    count++;
+  }
+  return count;
 }
 
 // ─── Commands ────────────────────────────────────────────────────────────────
@@ -491,6 +709,197 @@ function cmdShow(args) {
   return 0;
 }
 
+function cmdTick(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        verbose: { type: 'boolean' },
+        force:   { type: 'boolean' }   // ignore lock (debug only)
+      },
+      allowPositionals: false,
+      strict: true
+    });
+  } catch (e) {
+    err(`error: ${e.message}`);
+    return 1;
+  }
+  const verbose = parsed.values.verbose;
+  const tickStart = new Date();
+
+  // Ensure orchestrator dirs exist (be tolerant: maybe init wasn't run yet)
+  const orchDir = path.join(JOSH_ROOT, 'orchestrator');
+  for (const sub of ['', 'incoming']) {
+    const p = sub ? path.join(orchDir, sub) : orchDir;
+    if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
+  }
+
+  // Lock
+  if (!parsed.values.force) {
+    if (!lockAcquire()) {
+      if (verbose) log('orchestrator lock held by another tick; skipping');
+      return 0;
+    }
+  } else {
+    // Force: best-effort unlink, then acquire.
+    try { fs.unlinkSync(LOCK_PATH()); } catch (e) {}
+    lockAcquire();
+  }
+
+  let controlsProcessed = 0;
+  let triaged = 0;
+  let swept = 0;
+  let triagedFailed = 0;
+
+  try {
+    // 1. Process control commands
+    controlsProcessed = processAllControls();
+
+    // 2. Read pause/drain state AFTER controls (a control may have set them)
+    const paused = isPaused();
+    const draining = isDraining();
+
+    // 3. Triage incoming → triaged (skip if paused; allow during drain)
+    if (!paused) {
+      const incomingDir = path.join(JOSH_ROOT, 'todo', 'incoming');
+      for (const file of listJsonIn(incomingDir)) {
+        const r = triageOne(file);
+        if (r.result === 'triaged') triaged++;
+        else triagedFailed++;
+      }
+    }
+
+    // 4. Sweep stale claims
+    swept = sweepStaleClaims();
+
+    // 5. Update status board
+    const status = readStatus();
+    status.agents.orchestrator = {
+      ...status.agents.orchestrator,
+      alive: true,
+      last_tick: new Date().toISOString(),
+      tick_count: (status.agents.orchestrator?.tick_count || 0) + 1,
+      interval_sec: status.agents.orchestrator?.interval_sec || DEFAULT_INTERVAL_SEC,
+      paused,
+      draining
+    };
+    refreshQueueCounts(status);
+    status.updated_at = new Date().toISOString();
+    writeStatus(status);
+
+    // 6. Audit the tick
+    appendAudit({
+      actor: 'orchestrator',
+      action: 'orchestrator.tick',
+      id: null,
+      details: {
+        controls: controlsProcessed,
+        triaged,
+        triaged_failed: triagedFailed,
+        swept,
+        paused,
+        draining,
+        duration_ms: Date.now() - tickStart.getTime()
+      }
+    });
+
+    // 7. One-line summary (or verbose multi-line)
+    const tickN = status.agents.orchestrator.tick_count;
+    if (verbose) {
+      log(`tick ${tickN} @ ${status.agents.orchestrator.last_tick}`);
+      log(`  controls: ${controlsProcessed}  triaged: ${triaged}  swept: ${swept}  failed: ${triagedFailed}`);
+      log(`  paused: ${paused}  draining: ${draining}`);
+      log(`  queue: incoming=${status.queue.incoming} triaged=${status.queue.triaged} in_progress=${status.queue.in_progress}`);
+    } else {
+      log(`tick ${tickN}: triaged=${triaged} swept=${swept} controls=${controlsProcessed}${paused ? ' [paused]' : ''}${draining ? ' [draining]' : ''}`);
+    }
+  } finally {
+    lockRelease();
+  }
+  return 0;
+}
+
+function cmdControl(args) {
+  const action = args[0];
+  if (!action) {
+    err('error: action required. usage: josh control <action> [args]');
+    err('actions: pause, resume, drain, undrain, sweep-now, set-interval <sec>, reorder <todo-id> --priority pX');
+    return 1;
+  }
+  // Normalize hyphenated CLI form to spec form (sweep-now → sweep_now, set-interval → set_interval)
+  const specAction = action.replace(/-/g, '_');
+  const subArgs = args.slice(1);
+
+  let payload = { schema: 1, id: ulid(), action: specAction };
+
+  switch (specAction) {
+    case 'pause':
+    case 'resume':
+    case 'drain':
+    case 'undrain':
+    case 'sweep_now':
+      // No extra args.
+      break;
+    case 'set_interval': {
+      const sec = parseInt(subArgs[0], 10);
+      if (!Number.isFinite(sec) || sec < 10 || sec > 86400) {
+        err('error: set-interval requires <seconds> in [10, 86400]');
+        return 1;
+      }
+      payload.interval_sec = sec;
+      break;
+    }
+    case 'reorder': {
+      const todoId = subArgs[0];
+      if (!todoId) {
+        err('error: reorder requires <todo-id> --priority pX');
+        return 1;
+      }
+      let parsed;
+      try {
+        parsed = parseArgs({
+          args: subArgs.slice(1),
+          options: { priority: { type: 'string' } },
+          allowPositionals: false,
+          strict: true
+        });
+      } catch (e) {
+        err(`error: ${e.message}`);
+        return 1;
+      }
+      const newPri = parsed.values.priority;
+      if (!VALID_PRIORITIES.includes(newPri)) {
+        err(`error: --priority must be one of ${VALID_PRIORITIES.join(', ')}`);
+        return 1;
+      }
+      payload.todo_id = todoId;
+      payload.new_priority = newPri;
+      break;
+    }
+    default:
+      err(`unknown control action: ${action}`);
+      err('actions: pause, resume, drain, undrain, sweep-now, set-interval, reorder');
+      return 1;
+  }
+
+  // Drop into orchestrator/incoming/<id>.json
+  const dir = path.join(JOSH_ROOT, 'orchestrator', 'incoming');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const filepath = path.join(dir, `${payload.id}.json`);
+  writeJsonAtomic(filepath, payload);
+
+  appendAudit({
+    actor: defaultActor(),
+    action: 'control.queued',
+    id: payload.id,
+    details: { control_action: specAction, ...(payload.todo_id ? { todo_id: payload.todo_id } : {}) }
+  });
+
+  log(payload.id);
+  return 0;
+}
+
 function cmdHelp() {
   log(`josh — CLI for the ~/.josh/ shared agent runtime`);
   log(``);
@@ -502,6 +911,8 @@ function cmdHelp() {
   log(`  push todo "title" [flags]     create a new todo in incoming/`);
   log(`  list todo [--state STATE]     list todos (defaults to live states)`);
   log(`  show <id>                     print any artifact by ID (full or last-6)`);
+  log(`  tick [--verbose] [--force]    one orchestrator heartbeat (cron driver)`);
+  log(`  control <action> [args]       send a control command to the orchestrator`);
   log(`  help                          show this message`);
   log(`  version                       show CLI version`);
   log(``);
@@ -519,6 +930,13 @@ function cmdHelp() {
   log(`list todo flags:`);
   log(`  --state incoming|triaged|in_progress|blocked|done|failed|cancelled|all`);
   log(`  --agent NAME    --priority p0|p1|p2|p3    --json`);
+  log(``);
+  log(`control actions:`);
+  log(`  pause | resume                pause/resume triage of new incoming todos`);
+  log(`  drain | undrain               drain mode: finish current, take no new`);
+  log(`  sweep-now                     trigger stale-claim sweep on next tick`);
+  log(`  set-interval <seconds>        change orchestrator heartbeat interval`);
+  log(`  reorder <todo-id> --priority pX   change a live todo's priority`);
   log(``);
   log(`spec: ${path.join(JOSH_ROOT, 'README.md')}`);
   log(`env:  JOSH_ROOT=${JOSH_ROOT}`);
@@ -539,6 +957,8 @@ const COMMANDS = {
   push: cmdPush,
   list: cmdList,
   show: cmdShow,
+  tick: cmdTick,
+  control: cmdControl,
   help: cmdHelp,
   '--help': cmdHelp,
   '-h': cmdHelp,
