@@ -1,24 +1,12 @@
 {
   "name": "levi",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Levi — minimal Claude Code plugin shell. Same axes as Reuben, zero items inside. Add modes, agents, hooks, and reporters one at a time.",
   "author": {
     "name": "Levi",
     "url": "https://github.com/VoteWood/Levi"
   },
   "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.js\"",
-            "timeout": 5,
-            "statusMessage": "Loading Levi..."
-          }
-        ]
-      }
-    ],
     "UserPromptSubmit": [
       {
         "hooks": [
