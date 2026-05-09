@@ -2238,6 +2238,209 @@ function cmdListReviews(args) {
   return 0;
 }
 
+// ─── Schema validation ───────────────────────────────────────────────────────
+
+// Each validator returns an array of error strings. Empty = valid.
+
+function vRequired(obj, field, type) {
+  if (obj[field] === undefined || obj[field] === null) return [`${field}: missing`];
+  if (type === 'array' && !Array.isArray(obj[field])) return [`${field}: not array`];
+  if (type !== 'array' && typeof obj[field] !== type) return [`${field}: not ${type}`];
+  return [];
+}
+function vEnum(obj, field, allowed, optional = false) {
+  if (obj[field] === undefined || obj[field] === null) return optional ? [] : [`${field}: missing`];
+  if (!allowed.includes(obj[field])) return [`${field}: '${obj[field]}' not in [${allowed.join(', ')}]`];
+  return [];
+}
+function vIso8601(obj, field, optional = false) {
+  const v = obj[field];
+  if (v === undefined || v === null) return optional ? [] : [`${field}: missing`];
+  if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.test(v)) {
+    return [`${field}: '${v}' not ISO-8601`];
+  }
+  return [];
+}
+
+function validateTodo(t) {
+  return [
+    ...vRequired(t, 'schema', 'number'),
+    ...vRequired(t, 'id', 'string'),
+    ...vRequired(t, 'title', 'string'),
+    ...vIso8601(t, 'created_at'),
+    ...vRequired(t, 'created_by', 'string'),
+    ...vEnum(t, 'priority', VALID_PRIORITIES),
+    ...vRequired(t, 'history', 'array')
+  ].filter(Boolean);
+}
+
+function validateHandoff(h) {
+  return [
+    ...vRequired(h, 'schema', 'number'),
+    ...vRequired(h, 'id', 'string'),
+    ...vRequired(h, 'thread_id', 'string'),
+    ...vRequired(h, 'from', 'string'),
+    ...vEnum(h, 'to', KNOWN_AGENTS),
+    ...vEnum(h, 'kind', HANDOFF_KINDS),
+    ...vRequired(h, 'title', 'string'),
+    ...vRequired(h, 'body', 'string'),
+    ...vIso8601(h, 'created_at'),
+    ...vEnum(h, 'priority', VALID_PRIORITIES, true)
+  ];
+}
+
+function validateApproval(a) {
+  return [
+    ...vRequired(a, 'schema', 'number'),
+    ...vRequired(a, 'id', 'string'),
+    ...vIso8601(a, 'created_at'),
+    ...vRequired(a, 'requester', 'string'),
+    ...vRequired(a, 'summary', 'string'),
+    ...vRequired(a, 'options', 'array')
+  ];
+}
+
+function validateReview(r) {
+  return [
+    ...vRequired(r, 'schema', 'number'),
+    ...vRequired(r, 'id', 'string'),
+    ...vIso8601(r, 'created_at'),
+    ...vRequired(r, 'requested_by', 'string'),
+    ...vEnum(r, 'subject_type', VALID_SUBJECT_TYPES),
+    ...vRequired(r, 'subject_ref', 'string'),
+    ...vEnum(r, 'framing', VALID_FRAMINGS),
+    ...vRequired(r, 'reviewer', 'string')
+  ];
+}
+
+function validateLock(l) {
+  return [
+    ...vRequired(l, 'schema', 'number'),
+    ...vRequired(l, 'resource', 'string'),
+    ...vRequired(l, 'holder', 'string'),
+    ...vIso8601(l, 'acquired_at'),
+    ...vIso8601(l, 'expires_at')
+  ];
+}
+
+function validateStatus(s) {
+  const errs = [
+    ...vRequired(s, 'schema', 'number'),
+    ...vIso8601(s, 'updated_at'),
+    ...vRequired(s, 'agents', 'object'),
+    ...vRequired(s, 'queue', 'object')
+  ];
+  return errs;
+}
+
+function validateControl(c) {
+  return [
+    ...vRequired(c, 'schema', 'number'),
+    ...vRequired(c, 'id', 'string'),
+    ...vRequired(c, 'action', 'string')
+  ];
+}
+
+// Map relative path → validator. Returns null if file is not validatable.
+function validatorFor(rel) {
+  const norm = rel.replace(/\\/g, '/');
+  if (norm === 'status.json') return { kind: 'root-status', fn: validateStatus };
+  if (norm.match(/^todo\/(incoming|triaged|in_progress|done|blocked|failed|cancelled)\/.+\.json$/)) {
+    return { kind: 'todo', fn: validateTodo };
+  }
+  if (norm.match(/^(claude|codex|orchestrator)\/(incoming|processed)\/.+\.json$/)) {
+    // orchestrator/incoming is control commands; everything else is handoff.
+    if (norm.startsWith('orchestrator/incoming/')) return { kind: 'control', fn: validateControl };
+    return { kind: 'handoff', fn: validateHandoff };
+  }
+  if (norm.match(/^(claude|codex|orchestrator)\/status\.json$/)) {
+    // Agent status — minimal shape.
+    return { kind: 'agent-status', fn: (o) => [
+      ...vRequired(o, 'schema', 'number'),
+      ...vRequired(o, 'agent', 'string')
+    ]};
+  }
+  if (norm.match(/^approvals\/(pending|done)\/.+\.json$/)) return { kind: 'approval', fn: validateApproval };
+  if (norm.match(/^reviews\/(pending|done)\/.+\.json$/)) return { kind: 'review', fn: validateReview };
+  if (norm.match(/^locks\/.+\.json$/)) return { kind: 'lock', fn: validateLock };
+  return null; // unknown / not-a-tracked-artifact
+}
+
+function cmdValidate(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        json:    { type: 'boolean' },
+        verbose: { type: 'boolean' },
+        strict:  { type: 'boolean' }   // exit non-zero on any error
+      },
+      allowPositionals: false,
+      strict: true
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const results = { ok: 0, errors: [], skipped: 0, malformed_json: 0 };
+  const byKind = {};
+
+  for (const file of walkTree(JOSH_ROOT, 0, 4)) {
+    const rel = path.relative(JOSH_ROOT, file).replace(/\\/g, '/');
+    if (!rel.endsWith('.json')) continue;
+    const v = validatorFor(rel);
+    if (!v) { results.skipped++; continue; }
+
+    let obj;
+    try { obj = JSON.parse(fs.readFileSync(file, 'utf8')); }
+    catch (e) {
+      results.malformed_json++;
+      results.errors.push({ file: rel, kind: v.kind, errors: [`json parse: ${e.message}`] });
+      continue;
+    }
+
+    const errs = v.fn(obj);
+    byKind[v.kind] = byKind[v.kind] || { ok: 0, bad: 0 };
+    if (errs.length === 0) {
+      results.ok++;
+      byKind[v.kind].ok++;
+    } else {
+      results.errors.push({ file: rel, kind: v.kind, errors: errs });
+      byKind[v.kind].bad++;
+    }
+  }
+
+  if (parsed.values.json) {
+    log(JSON.stringify({ ok: results.ok, error_count: results.errors.length,
+      malformed_json: results.malformed_json, skipped: results.skipped,
+      by_kind: byKind, errors: results.errors }, null, 2));
+    return parsed.values.strict && results.errors.length > 0 ? 1 : 0;
+  }
+
+  log(`josh validate — ${JOSH_ROOT}`);
+  log(``);
+  log(`scanned: ${results.ok + results.errors.length} validatable files (${results.skipped} skipped, ${results.malformed_json} malformed JSON)`);
+  log(``);
+  log(`by kind:`);
+  for (const [kind, counts] of Object.entries(byKind)) {
+    const tag = counts.bad > 0 ? '  bad: ' + counts.bad : '';
+    log(`  ${kind.padEnd(15)} ok: ${counts.ok}${tag}`);
+  }
+
+  if (results.errors.length > 0) {
+    log(``);
+    log(`errors:`);
+    for (const e of results.errors) {
+      log(`  ${e.file} [${e.kind}]:`);
+      for (const msg of e.errors) log(`    - ${msg}`);
+    }
+  } else {
+    log(``);
+    log(`✓ all files valid`);
+  }
+
+  return parsed.values.strict && results.errors.length > 0 ? 1 : 0;
+}
+
 function cmdHelp() {
   log(`josh — CLI for the ~/.josh/ shared agent runtime`);
   log(``);
@@ -2281,6 +2484,10 @@ function cmdHelp() {
   log(`         [--framing regular|adversarial] [--deadline ISO] [--priority pX] [--notes "..."]`);
   log(`  list reviews [--state pending|done|all] [--reviewer X] [--verdict V]`);
   log(`  review <review-id> --verdict approve|request_changes|block --reasoning "..." [--as ACTOR]`);
+  log(``);
+  log(`maintenance:`);
+  log(`  validate [--json] [--verbose] [--strict]   walk tree, check every JSON against`);
+  log(`                                              its schema. --strict: exit 1 on errors.`);
   log(``);
   log(`locks (general resource locks):`);
   log(`  lock acquire <resource> [--ttl 1h] [--reason "..."]   acquire a lock`);
@@ -2345,6 +2552,7 @@ const COMMANDS = {
   approve: cmdApprove,
   deny: cmdDeny,
   review: cmdReview,
+  validate: cmdValidate,
   lock: cmdLock,
   help: cmdHelp,
   '--help': cmdHelp,
