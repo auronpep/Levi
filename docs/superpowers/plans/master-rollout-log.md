@@ -95,3 +95,16 @@ Append-only journal of the autonomous Phase 3 → Phase 10 rollout. One section 
 - **Started:** (next)
 - **Branch:** `claude/josh-phase9-dashboard` (off Phase 8 HEAD)
 - **Plan doc:** `2026-05-10-josh-dashboard-phase9.md`
+- **Status:** SHIPPED → PR (pending push)
+- **Commits:** 2 (1 big feature + 1 log)
+- **Tests:** 211 pass / 0 fail / 1 skipped
+- **Shipped:** cost-ledger (per-month JSONL), drift-alerts, dashboard text renderer; CLI: josh cost log/summary/list-months, josh dashboard.
+- **Deferred to 9B:** Web UI (langfuse-style sidecar). v1 ships text-mode CLI per master design §1.6.
+
+---
+
+## Phase 10 — Multi-machine + sprint continuity
+
+- **Started:** (next)
+- **Branch:** `claude/josh-phase10-multi-machine` (off Phase 9 HEAD)
+- **Plan doc:** `2026-05-10-josh-multi-machine-phase10.md`

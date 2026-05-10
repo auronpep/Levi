@@ -275,6 +275,32 @@ Each speculative worktree is a real `git worktree`. Agents run in their own chec
 
 Every `josh tick` calls `sweepWorktrees` against `done/`, `failed/`, `cancelled/`. For each todo with one or more `worktree-*/` siblings, it tries `git worktree remove --force`, runs `git worktree prune` (clears stale registry entries from folder renames), deletes the agent branch, and removes the worktree directory. Reported as `worktrees_swept=N` in tick summary.
 
+## Ops dashboard + cost telemetry (Phase 9)
+
+Per spec §12 row 9: text-mode dashboard, cost ledger, drift alerts. **No web UI in v1** — surfaces are CLI commands. Web UI deferred to Phase 9B.
+
+### Cost ledger
+
+Append-only JSONL at `~/.josh/cost/<YYYY-MM>.jsonl`. Each line: `{at, todo_id, agent_id, model, tokens_in, tokens_out, wall_seconds, usd, phase, sentinel}`.
+
+```
+josh cost log --todo <id> --agent <id> --model <m> --tokens-in N --tokens-out N --wall N --usd N [--phase N]
+josh cost summary [--month YYYY-MM] [--since ISO] [--by agent|phase|model]
+josh cost list-months
+```
+
+### Drift alerts
+
+`bin/josh/lib/drift-alerts.js` `computeDriftAlerts(joshRoot, {window, threshold})`. Default window=10, threshold=3. An alert fires when the same agent disagrees with E08 ≥ 3 times in the last 10 matrix runs (per archetype). Below threshold = noise; not surfaced.
+
+### Dashboard
+
+```
+josh dashboard [--project <id>] [--since ISO] [--drift-window N] [--drift-threshold N]
+```
+
+Sections: queue snapshot, in-flight by phase, in-flight by agent, cost summary (USD/hour rolling), drift alerts. Per-project view via `--project <id>` reuses the Phase 1 `renderDailyReview`.
+
 ## Cross-runtime gateway (Phase 8)
 
 Per spec §11. Three pieces: an MCP server registry, per-agent tool scoping, and an A2A HTTP bridge for external (non–Claude-Code/Codex/OpenClaw) agents.

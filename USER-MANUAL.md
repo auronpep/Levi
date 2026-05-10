@@ -751,6 +751,25 @@ Now requires a valid `handoff.md` in the todo folder unless `--skip-handoff` is 
 
 Each todo folder carries an append-only `events.ndjson` for the 14-event taxonomy (5 lifecycle: `start`/`heartbeat`/`done`/`failed`/`interrupted`; 9 stream: `backend_ref`/`run_started`/`text_delta`/`tool_call`/`pending_input`/`pending_input_resolved`/`plan_artifact`/`settings_changed`/`run_completed`). Phase 2A ships only the append helper (`bin/josh/lib/events-writer.js`); session-side emission is wired by future code.
 
+### 7.22 Ops dashboard + cost telemetry (Phase 9)
+
+Text-mode dashboard + per-month cost ledger + drift alerts. No web UI in v1.
+
+#### CLI
+
+- `josh cost log --todo <id> --agent <id> --model <m> --tokens-in N --tokens-out N --wall N --usd N [--phase N]`
+- `josh cost summary [--month YYYY-MM] [--since ISO] [--by agent|phase|model]`
+- `josh cost list-months`
+- `josh dashboard [--project <id>] [--since ISO] [--drift-window N] [--drift-threshold N]`
+
+#### Layout
+
+- `~/.josh/cost/<YYYY-MM>.jsonl` — append-only entries `{at, todo_id, agent_id, model, tokens_in, tokens_out, wall_seconds, usd, phase, sentinel}`.
+
+#### Drift alerts
+
+Same agent disagrees with E08 ≥ 3 times in the last 10 matrix runs (per archetype). Below threshold suppressed.
+
 ### 7.21 Cross-runtime gateway (Phase 8)
 
 Three subsystems for letting external runtimes participate as first-class agents.
