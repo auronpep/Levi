@@ -751,6 +751,26 @@ Now requires a valid `handoff.md` in the todo folder unless `--skip-handoff` is 
 
 Each todo folder carries an append-only `events.ndjson` for the 14-event taxonomy (5 lifecycle: `start`/`heartbeat`/`done`/`failed`/`interrupted`; 9 stream: `backend_ref`/`run_started`/`text_delta`/`tool_call`/`pending_input`/`pending_input_resolved`/`plan_artifact`/`settings_changed`/`run_completed`). Phase 2A ships only the append helper (`bin/josh/lib/events-writer.js`); session-side emission is wired by future code.
 
+### 7.23 Multi-machine + sprint continuity (Phase 10)
+
+Phase 10 ships the **primitives** for multi-machine operation. Single-host validated. Real cross-PC integration is post-rollout work.
+
+#### Per-host capacity overrides
+
+`~/.josh/<hostname>.capacity.json` overrides `backpressure.json` for that host. CLI: `josh host show` / `josh host capacity-set` / `josh host capacity-list`.
+
+#### Per-host claim hygiene
+
+`meta.claim.host` stamped at claim time. `sweepStaleClaims` only sweeps local-host claims. `JOSH_HOST_OVERRIDE` env var overrides `os.hostname()` for testing.
+
+#### Sync conflict resolver
+
+`josh sync resolve [--dry-run]` walks Syncthing-style `*.sync-conflict-*` files. Lex-greater ULID wins, loser archived to `~/.josh/conflicts/<date>/`. `josh sync status` previews; `josh sync stignore` writes the recommended `.stignore`.
+
+#### Sprint snapshot
+
+`josh sprint snapshot [--label <tag>]` captures queue + cost + audit-chain-tip to `~/.josh/sprints/`. `josh sprint list` / `josh sprint show <name>`.
+
 ### 7.22 Ops dashboard + cost telemetry (Phase 9)
 
 Text-mode dashboard + per-month cost ledger + drift alerts. No web UI in v1.

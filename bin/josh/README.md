@@ -275,6 +275,52 @@ Each speculative worktree is a real `git worktree`. Agents run in their own chec
 
 Every `josh tick` calls `sweepWorktrees` against `done/`, `failed/`, `cancelled/`. For each todo with one or more `worktree-*/` siblings, it tries `git worktree remove --force`, runs `git worktree prune` (clears stale registry entries from folder renames), deletes the agent branch, and removes the worktree directory. Reported as `worktrees_swept=N` in tick summary.
 
+## Multi-machine + sprint continuity (Phase 10)
+
+Per spec §12 row 10. Ships **primitives** that make `~/.josh/` safe to put under Syncthing across the AM 4-PC network. Single-host validated; real cross-PC requires Syncthing setup outside josh's scope.
+
+### Per-host capacity tag
+
+```
+~/.josh/<hostname>.capacity.json
+{ "schema": 1, "host": "JESUSISKING",
+  "max_concurrent": 6, "max_concurrent_per_phase": 3, "max_concurrent_per_agent": 1 }
+```
+
+When present, overrides matching keys in `orchestrator/backpressure.json` for that host. Added to `.stignore`.
+
+```
+josh host show
+josh host capacity-set [--max-concurrent N] [--max-concurrent-per-phase N] [--max-concurrent-per-agent N] [--host <name>]
+josh host capacity-list
+```
+
+### Per-host claim hygiene
+
+`meta.claim.host` stamped at claim time. `sweepStaleClaims` only sweeps claims tagged with the local host. `JOSH_HOST_OVERRIDE` env var overrides `os.hostname()` for testing.
+
+### Sync conflict resolver
+
+```
+josh sync resolve [--dry-run]
+josh sync status
+josh sync stignore
+```
+
+`*.sync-conflict-<YYYYMMDD>-<HHMM>-<HOST>` files resolved deterministically: lex-greater ULID wins, loser archived to `~/.josh/conflicts/<date>/`. Orphan conflicts (canonical missing) get promoted to the canonical name.
+
+### Sprint snapshot
+
+```
+josh sprint snapshot [--label <tag>]
+josh sprint list
+josh sprint show <name>
+```
+
+Captures `{queue counts, in_flight_by_agent, cost_total_usd, audit_chain_tip, host}` to `~/.josh/sprints/<YYYY-MM-DD-HHMM>[-<label>].json`. Useful for sprint roll-over reviews.
+
+Phase 10B (deferred): real cross-PC integration testing requires Syncthing on ≥2 of the AM PCs and is post-rollout work. Primitives shipped here unblock that integration whenever it happens.
+
 ## Ops dashboard + cost telemetry (Phase 9)
 
 Per spec §12 row 9: text-mode dashboard, cost ledger, drift alerts. **No web UI in v1** — surfaces are CLI commands. Web UI deferred to Phase 9B.
