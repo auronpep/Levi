@@ -1390,6 +1390,19 @@ function cmdTick(args) {
       matrixAutoAccepted = r.auto_accepted;
     }
 
+    // 5e. Phase 5: sweep worktrees of terminal todos (done/failed/cancelled)
+    let worktreesSwept = 0;
+    if (!paused) {
+      try {
+        const { sweepWorktrees } = require('./lib/worktree');
+        const r = sweepWorktrees(JOSH_ROOT);
+        worktreesSwept = r.swept;
+        if (worktreesSwept > 0) {
+          appendAudit({ actor: 'orchestrator', action: 'worktree.swept', id: null, details: { count: worktreesSwept } });
+        }
+      } catch (e) { /* non-fatal */ }
+    }
+
     // 6. Auto-resolve expired approvals (default decision applied)
     expired = expireApprovals();
 
@@ -1425,6 +1438,7 @@ function cmdTick(args) {
         matrix_queued: matrixQueued,
         matrix_winners: matrixWinners,
         matrix_auto_accepted: matrixAutoAccepted,
+        worktrees_swept: worktreesSwept,
         expired_approvals: expired,
         paused,
         draining,
@@ -1440,7 +1454,7 @@ function cmdTick(args) {
       log(`  paused: ${paused}  draining: ${draining}`);
       log(`  queue: incoming=${status.queue.incoming} triaged=${status.queue.triaged} in_progress=${status.queue.in_progress}`);
     } else {
-      log(`tick ${tickN}: triaged=${triaged}${routed > 0 ? ` (routed:${routed})` : ''} swept=${swept} promoted=${promoted}${throttled > 0 ? ` throttled=${throttled}` : ''}${doomLooped > 0 ? ` doom_looped=${doomLooped}` : ''}${matrixQueued > 0 ? ` matrix_queued=${matrixQueued}` : ''}${matrixWinners > 0 ? ` matrix_winners=${matrixWinners}` : ''}${matrixAutoAccepted > 0 ? ` matrix_auto_accepted=${matrixAutoAccepted}` : ''} expired=${expired} controls=${controlsProcessed}${paused ? ' [paused]' : ''}${draining ? ' [draining]' : ''}`);
+      log(`tick ${tickN}: triaged=${triaged}${routed > 0 ? ` (routed:${routed})` : ''} swept=${swept} promoted=${promoted}${throttled > 0 ? ` throttled=${throttled}` : ''}${doomLooped > 0 ? ` doom_looped=${doomLooped}` : ''}${matrixQueued > 0 ? ` matrix_queued=${matrixQueued}` : ''}${matrixWinners > 0 ? ` matrix_winners=${matrixWinners}` : ''}${matrixAutoAccepted > 0 ? ` matrix_auto_accepted=${matrixAutoAccepted}` : ''}${worktreesSwept > 0 ? ` worktrees_swept=${worktreesSwept}` : ''} expired=${expired} controls=${controlsProcessed}${paused ? ' [paused]' : ''}${draining ? ' [draining]' : ''}`);
     }
   } finally {
     lockRelease();
@@ -1534,10 +1548,13 @@ function cmdClaim(args) {
     parsed = parseArgs({
       args,
       options: {
-        as:    { type: 'string' },
-        actor: { type: 'string' },
-        ttl:   { type: 'string' },
-        agent: { type: 'string' },
+        as:           { type: 'string' },
+        actor:        { type: 'string' },
+        ttl:          { type: 'string' },
+        agent:        { type: 'string' },
+        speculative:  { type: 'string' },
+        'base-repo':  { type: 'string' },
+        'base-branch':{ type: 'string' },
       },
       allowPositionals: true,
       strict: true
@@ -1554,6 +1571,15 @@ function cmdClaim(args) {
   }
 
   const agentId = parsed.values.agent || null;
+  const speculativeN = parsed.values.speculative ? parseInt(parsed.values.speculative, 10) : null;
+  if (speculativeN != null) {
+    if (!Number.isFinite(speculativeN) || speculativeN < 2 || speculativeN > 10) {
+      return errExit('--speculative N must be in [2, 10]', 1);
+    }
+    if (!agentId) {
+      return errExit('--speculative requires --agent <id>', 1);
+    }
+  }
 
   // If --agent given, take the dispatch path (triaged → claimed) with brief injection.
   if (agentId) {
@@ -1597,12 +1623,13 @@ function cmdClaim(args) {
       idOrSuffix: idArg,
       actor,
       eventName: 'claimed',
-      eventDetails: { ttl_sec: ttlSec, agent_id: agentId },
+      eventDetails: { ttl_sec: ttlSec, agent_id: agentId, speculative_n: speculativeN || 1 },
       update: (t, now) => {
         t.claim = { by: actor, at: now, ttl_sec: ttlSec, agent_id: agentId };
         t.agent_brief_path = brief.path;
+        if (speculativeN) t.speculative_n = speculativeN;
       },
-      audit: { action: 'todo.claimed', details: { ttl_sec: ttlSec, agent_id: agentId } }
+      audit: { action: 'todo.claimed', details: { ttl_sec: ttlSec, agent_id: agentId, speculative_n: speculativeN || 1 } }
     });
     if (r.error) return errExit(r.error, r.code);
     // After move, write runtime.json next to meta.json.
@@ -1614,7 +1641,29 @@ function cmdClaim(args) {
       claimed_by: agentId,
       actor,
       started_at: new Date().toISOString(),
+      speculative_n: speculativeN || 1,
     };
+    // Phase 5: --speculative N forks N worktrees of meta.context.repo.
+    if (speculativeN) {
+      const meta = readJson(path.join(claimedFolder, 'meta.json')) || {};
+      const baseRepo = parsed.values['base-repo'] || (meta.context && meta.context.repo);
+      const baseBranch = parsed.values['base-branch'] || (meta.context && meta.context.branch) || 'main';
+      if (!baseRepo) {
+        return errExit('--speculative requires meta.context.repo or --base-repo <path>', 1);
+      }
+      try {
+        const { createWorktree } = require('./lib/worktree');
+        const wts = [];
+        for (let i = 1; i <= speculativeN; i++) {
+          const w = createWorktree(JOSH_ROOT, r.id, { baseRepo, baseBranch, suffix: i });
+          wts.push({ path: w.path, branch: w.branch, suffix: w.suffix });
+          log(`  worktree[${i}]: ${path.relative(JOSH_ROOT, w.path).replace(/\\/g, '/')} (${w.branch})`);
+        }
+        runtime.worktrees = wts;
+      } catch (e) {
+        return errExit(`worktree creation failed: ${e.message}`, 4);
+      }
+    }
     writeJsonAtomic(path.join(claimedFolder, 'runtime.json'), runtime);
     log(r.id);
     return 0;

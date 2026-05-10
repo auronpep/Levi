@@ -46,21 +46,36 @@ function createWorktree(joshRoot, todoId, opts = {}) {
   return { path: wtPath, branch, suffix: suffix || '' };
 }
 
+function readRuntimeWorktrees(folder) {
+  try {
+    const r = JSON.parse(fs.readFileSync(path.join(folder, 'runtime.json'), 'utf8'));
+    return Array.isArray(r.worktrees) ? r.worktrees : [];
+  } catch (e) { return []; }
+}
+
 function listWorktrees(joshRoot, todoId) {
   const found = findTodoFolder(joshRoot, todoId);
   if (!found) return [];
-  const out = [];
+  // Prefer runtime.json (has authoritative branch names that survive folder renames).
+  const runtimeWts = readRuntimeWorktrees(found.folder);
+  const byName = new Map();
+  for (const w of runtimeWts) {
+    const subdir = w.suffix === '' ? 'worktree' : `worktree-${w.suffix}`;
+    const wtPath = path.join(found.folder, subdir);  // re-resolve to current location
+    byName.set(subdir, { path: wtPath, branch: w.branch, suffix: String(w.suffix) });
+  }
+  // Add any worktree dirs present that aren't in runtime.json (best-effort branch detection).
   for (const e of fs.readdirSync(found.folder, { withFileTypes: true })) {
     if (!e.isDirectory()) continue;
-    if (e.name === 'worktree' || /^worktree-/.test(e.name)) {
-      const wtPath = path.join(found.folder, e.name);
-      const suffix = e.name === 'worktree' ? '' : e.name.replace(/^worktree-/, '');
-      let branch = null;
-      try { branch = git(wtPath, 'rev-parse --abbrev-ref HEAD').trim(); } catch (_) {}
-      out.push({ path: wtPath, branch, suffix });
-    }
+    if (!(e.name === 'worktree' || /^worktree-/.test(e.name))) continue;
+    if (byName.has(e.name)) continue;
+    const wtPath = path.join(found.folder, e.name);
+    const suffix = e.name === 'worktree' ? '' : e.name.replace(/^worktree-/, '');
+    let branch = null;
+    try { branch = git(wtPath, 'rev-parse --abbrev-ref HEAD').trim(); } catch (_) {}
+    byName.set(e.name, { path: wtPath, branch, suffix });
   }
-  return out;
+  return Array.from(byName.values());
 }
 
 function removeWorktree(joshRoot, todoId, opts = {}) {
@@ -73,19 +88,21 @@ function removeWorktree(joshRoot, todoId, opts = {}) {
   let removed = 0;
   for (const wt of filtered) {
     let baseRepo = opts.baseRepo;
-    // If baseRepo not given, infer from the worktree's gitdir-pointer.
+    // If baseRepo not given, infer from the worktree's gitdir-pointer (only works
+    // if the worktree dir hasn't been moved since `git worktree add`).
     if (!baseRepo) {
       try {
         const gitDirPath = git(wt.path, 'rev-parse --git-common-dir').trim();
-        // common dir is <baseRepo>/.git; baseRepo is the parent.
         baseRepo = path.resolve(wt.path, gitDirPath, '..');
-      } catch (e) {
-        // fall through; we'll try removing the dir directly
-      }
+      } catch (e) { /* moved worktrees can't resolve this */ }
     }
     const branch = wt.branch;
     if (baseRepo) {
-      try { git(baseRepo, `worktree remove --force "${wt.path}"`); } catch (e) { /* fall through */ }
+      // Try the clean path first (works only if git's worktree registry still
+      // matches the current path).
+      try { git(baseRepo, `worktree remove --force "${wt.path}"`); } catch (e) { /* often fails after rename */ }
+      // Always prune to clean any stale registry entries pointing at moved paths.
+      try { git(baseRepo, `worktree prune`); } catch (e) {}
       if (branch && branch !== 'HEAD') {
         try { git(baseRepo, `branch -D ${branch}`); } catch (e) {}
       }
