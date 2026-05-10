@@ -11,13 +11,24 @@ const DEFAULTS = Object.freeze({
 
 function readBackpressureConfig(joshRoot) {
   const cfgPath = path.join(joshRoot, 'orchestrator', 'backpressure.json');
-  if (!fs.existsSync(cfgPath)) return { ...DEFAULTS };
-  try {
-    const raw = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
-    return { ...DEFAULTS, ...raw };
-  } catch (e) {
-    return { ...DEFAULTS };
+  let base = { ...DEFAULTS };
+  if (fs.existsSync(cfgPath)) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+      base = { ...base, ...raw };
+    } catch (e) {}
   }
+  // Phase 10: per-host capacity (~/.josh/<host>.capacity.json) overrides if present.
+  try {
+    const { readCapacity } = require('./host');
+    const hostCap = readCapacity(joshRoot);
+    if (hostCap) {
+      for (const k of ['max_concurrent', 'max_concurrent_per_phase', 'max_concurrent_per_agent']) {
+        if (Number.isFinite(hostCap[k])) base[k] = hostCap[k];
+      }
+    }
+  } catch (e) { /* host.js absent — ok */ }
+  return base;
 }
 
 function listInProgressFolders(joshRoot) {

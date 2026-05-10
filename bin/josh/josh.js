@@ -634,6 +634,8 @@ function expireApprovals() {
 
 function sweepStaleClaims(opts) {
   let swept = 0;
+  const { currentHost } = require('./lib/host');
+  const myHost = currentHost();
   const dir = path.join(JOSH_ROOT, 'todo', 'in_progress');
   let entries = [];
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) {}
@@ -643,6 +645,9 @@ function sweepStaleClaims(opts) {
     const todo = readJson(metaPath);
     if (!todo) continue;
     if (!todo.claim || !todo.claim.at || !todo.claim.ttl_sec) continue;
+    // Phase 10: only sweep claims tagged with this host (cross-host claim hygiene).
+    // Backward-compat: claims without `host` field are eligible (pre-Phase-10 data).
+    if (todo.claim.host && todo.claim.host !== myHost) continue;
     const claimAt = new Date(todo.claim.at).getTime();
     const expiresAt = claimAt + todo.claim.ttl_sec * 1000;
     if (Date.now() < expiresAt) continue;
@@ -1625,7 +1630,7 @@ function cmdClaim(args) {
       eventName: 'claimed',
       eventDetails: { ttl_sec: ttlSec, agent_id: agentId, speculative_n: speculativeN || 1 },
       update: (t, now) => {
-        t.claim = { by: actor, at: now, ttl_sec: ttlSec, agent_id: agentId };
+        t.claim = { by: actor, at: now, ttl_sec: ttlSec, agent_id: agentId, host: require('./lib/host').currentHost() };
         t.agent_brief_path = brief.path;
         if (speculativeN) t.speculative_n = speculativeN;
       },
@@ -1697,7 +1702,7 @@ function cmdClaim(args) {
     eventName: 'claimed',
     eventDetails: { ttl_sec: ttlSec },
     update: (todo, now) => {
-      todo.claim = { by: actor, at: now, ttl_sec: ttlSec };
+      todo.claim = { by: actor, at: now, ttl_sec: ttlSec, host: require('./lib/host').currentHost() };
     },
     audit: { action: 'todo.claimed', details: { ttl_sec: ttlSec } }
   });
@@ -3694,11 +3699,14 @@ function cmdAuditVerify(args) {
   if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return errExit('audit verify requires <YYYY-MM-DD>', 1);
   const { verifyChain } = require('./lib/audit-chain');
   const r = verifyChain(JOSH_ROOT, date);
+  const tail = (r.unchained > 0)
+    ? `  (chained: ${r.chained}, unchained: ${r.unchained} legacy)`
+    : `  (${r.chain_length} events)`;
   if (r.valid) {
-    log(`audit ${date}: VALID  (${r.chain_length} events)`);
+    log(`audit ${date}: VALID${tail}`);
     return 0;
   }
-  err(`audit ${date}: INVALID  (${r.chain_length} events, ${r.errors.length} errors)`);
+  err(`audit ${date}: INVALID${tail}`);
   for (const e of r.errors.slice(0, 20)) {
     err(`  line ${e.position}: ${e.message}`);
   }
@@ -4254,6 +4262,172 @@ function cmdDashboard(args) {
   return 0;
 }
 
+// ─── Phase 10: multi-machine + sprint continuity ─────────────────────────────
+
+function cmdSync(args) {
+  const sub = args[0];
+  const rest = args.slice(1);
+  if (!sub || sub === 'help' || sub === '--help' || sub === '-h') {
+    log(`Usage: josh sync <subcommand>
+
+Subcommands:
+  resolve [--dry-run]              Resolve Syncthing-style sync-conflict files
+  status                           Show pending sync conflicts (no changes)
+  stignore                         Write the recommended .stignore at JOSH_ROOT`);
+    return 0;
+  }
+  switch (sub) {
+    case 'resolve':  return cmdSyncResolve(rest);
+    case 'status':   return cmdSyncStatus(rest);
+    case 'stignore': return cmdSyncStignore(rest);
+    default: err(`unknown sync subcommand: ${sub}`); return 1;
+  }
+}
+
+function cmdSyncResolve(args) {
+  let parsed;
+  try { parsed = parseArgs({ args, options: { 'dry-run': { type: 'boolean' } }, allowPositionals: false, strict: true }); }
+  catch (e) { return errExit(e.message, 1); }
+  const { resolveAll } = require('./lib/sync-conflict');
+  const r = resolveAll(JOSH_ROOT, { dryRun: !!parsed.values['dry-run'] });
+  log(`sync resolve ${parsed.values['dry-run'] ? '(dry-run) ' : ''}${r.count} conflicts`);
+  for (const x of r.results) {
+    log(`  ${x.action}: ${x.source}${x.archived ? ' → ' + x.archived : ''}`);
+  }
+  appendAudit({
+    actor: defaultActor(),
+    action: 'sync.resolved',
+    id: null,
+    details: { count: r.count, dry_run: !!parsed.values['dry-run'] },
+  });
+  return 0;
+}
+
+function cmdSyncStatus() {
+  const { findConflicts } = require('./lib/sync-conflict');
+  const list = findConflicts(JOSH_ROOT);
+  if (list.length === 0) { log('(no sync conflicts)'); return 0; }
+  for (const c of list) log(`  ${c.kind} ${c.path}`);
+  return 0;
+}
+
+function cmdSyncStignore() {
+  const { writeStignore } = require('./lib/stignore');
+  const p = writeStignore(JOSH_ROOT);
+  log(`wrote ${p}`);
+  return 0;
+}
+
+function cmdSprint(args) {
+  const sub = args[0];
+  const rest = args.slice(1);
+  if (!sub || sub === 'help' || sub === '--help' || sub === '-h') {
+    log(`Usage: josh sprint <subcommand>
+
+Subcommands:
+  snapshot [--label TAG]            Capture queue + cost + audit-tip into ~/.josh/sprints/
+  list                              List existing snapshots
+  show <name>                       Print a snapshot by filename`);
+    return 0;
+  }
+  switch (sub) {
+    case 'snapshot': return cmdSprintSnapshot(rest);
+    case 'list':     return cmdSprintList(rest);
+    case 'show':     return cmdSprintShow(rest);
+    default: err(`unknown sprint subcommand: ${sub}`); return 1;
+  }
+}
+
+function cmdSprintSnapshot(args) {
+  let parsed;
+  try { parsed = parseArgs({ args, options: { label: { type: 'string' } }, allowPositionals: false, strict: true }); }
+  catch (e) { return errExit(e.message, 1); }
+  const { snapshot } = require('./lib/sprint');
+  const r = snapshot(JOSH_ROOT, { label: parsed.values.label });
+  log(`snapshot: ${path.relative(JOSH_ROOT, r.path).replace(/\\/g, '/')}`);
+  log(`  in_progress: ${r.snapshot.queue.in_progress}  done: ${r.snapshot.queue.done}  cost_usd: ${r.snapshot.cost_total_usd}`);
+  appendAudit({ actor: defaultActor(), action: 'sprint.snapshot', id: null, details: { path: r.path, label: parsed.values.label || null } });
+  return 0;
+}
+
+function cmdSprintList() {
+  const { listSnapshots } = require('./lib/sprint');
+  const list = listSnapshots(JOSH_ROOT);
+  if (list.length === 0) { log('(no snapshots)'); return 0; }
+  for (const f of list) log(`  ${f}`);
+  return 0;
+}
+
+function cmdSprintShow(args) {
+  const name = args[0];
+  if (!name) return errExit('sprint show requires <name>', 1);
+  const { loadSnapshot } = require('./lib/sprint');
+  try { log(JSON.stringify(loadSnapshot(JOSH_ROOT, name), null, 2)); return 0; }
+  catch (e) { return errExit(e.message, 2); }
+}
+
+function cmdHost(args) {
+  const sub = args[0];
+  const rest = args.slice(1);
+  if (!sub || sub === 'help' || sub === '--help' || sub === '-h') {
+    log(`Usage: josh host <subcommand>
+
+Subcommands:
+  show                                          Show current host + capacity (if set)
+  capacity-set [--max-concurrent N] [--max-concurrent-per-phase N] [--max-concurrent-per-agent N]
+  capacity-list                                 List per-host capacity files`);
+    return 0;
+  }
+  switch (sub) {
+    case 'show':          return cmdHostShow(rest);
+    case 'capacity-set':  return cmdHostCapacitySet(rest);
+    case 'capacity-list': return cmdHostCapacityList(rest);
+    default: err(`unknown host subcommand: ${sub}`); return 1;
+  }
+}
+
+function cmdHostShow() {
+  const { currentHost, readCapacity } = require('./lib/host');
+  const h = currentHost();
+  log(`host: ${h}`);
+  const cap = readCapacity(JOSH_ROOT, h);
+  log(`capacity: ${cap ? JSON.stringify(cap) : '(unset — global defaults apply)'}`);
+  return 0;
+}
+
+function cmdHostCapacitySet(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        'max-concurrent':            { type: 'string' },
+        'max-concurrent-per-phase':  { type: 'string' },
+        'max-concurrent-per-agent':  { type: 'string' },
+        host:                        { type: 'string' },
+      },
+      allowPositionals: false, strict: true,
+    });
+  } catch (e) { return errExit(e.message, 1); }
+  const { writeCapacity, currentHost } = require('./lib/host');
+  const cap = {};
+  if (parsed.values['max-concurrent']) cap.max_concurrent = parseInt(parsed.values['max-concurrent'], 10);
+  if (parsed.values['max-concurrent-per-phase']) cap.max_concurrent_per_phase = parseInt(parsed.values['max-concurrent-per-phase'], 10);
+  if (parsed.values['max-concurrent-per-agent']) cap.max_concurrent_per_agent = parseInt(parsed.values['max-concurrent-per-agent'], 10);
+  const host = parsed.values.host || currentHost();
+  const p = writeCapacity(JOSH_ROOT, host, cap);
+  log(`wrote capacity for ${host} → ${path.relative(JOSH_ROOT, p).replace(/\\/g, '/')}`);
+  return 0;
+}
+
+function cmdHostCapacityList() {
+  const { listHostCapacities } = require('./lib/host');
+  const list = listHostCapacities(JOSH_ROOT);
+  if (list.length === 0) { log('(no host capacity files)'); return 0; }
+  for (const h of list) log(`  ${h}`);
+  return 0;
+}
+
 // Augment cmdVerdict with `verify` subcommand.
 function cmdVerdictVerify(args) {
   const todoId = args[0];
@@ -4414,6 +4588,9 @@ const COMMANDS = {
   a2a: cmdA2A,
   cost: cmdCost,
   dashboard: cmdDashboard,
+  sync: cmdSync,
+  sprint: cmdSprint,
+  host: cmdHost,
   lock: cmdLock,
   help: cmdHelp,
   '--help': cmdHelp,

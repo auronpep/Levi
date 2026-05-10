@@ -22,10 +22,15 @@ function lastHmacOnDate(joshRoot, dateStr) {
   const text = fs.readFileSync(f, 'utf8');
   const lines = text.split('\n').filter(Boolean);
   if (lines.length === 0) return null;
-  try {
-    const last = JSON.parse(lines[lines.length - 1]);
-    return last.hmac || null;
-  } catch (e) { return null; }
+  // Walk backward to skip legacy/unchained tail lines (pre-Phase-6 plain audit events
+  // written by appendAudit). Return the most-recent hmac found.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const ev = JSON.parse(lines[i]);
+      if (ev.hmac) return ev.hmac;
+    } catch (e) {}
+  }
+  return null;
 }
 
 function appendChainedAudit(joshRoot, eventInput, opts = {}) {
@@ -76,29 +81,33 @@ function verifyChain(joshRoot, dateStr) {
   const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
   let prev = GENESIS_HMAC;
   let pos = 0;
+  let chained = 0, unchained = 0;
   for (const line of lines) {
     pos++;
     let ev;
     try { ev = JSON.parse(line); }
     catch (e) { errors.push({ position: pos, message: `malformed line: ${e.message}` }); continue; }
     const stored = ev.hmac;
-    if (!stored) { errors.push({ position: pos, message: 'missing hmac' }); continue; }
+    // Pre-Phase-6 plain audit events have no `hmac` field. Count and skip them —
+    // they're legacy, can't be cryptographically verified, but their presence is
+    // NOT a chain integrity error. (Master design risk register noted this.)
+    if (!stored) { unchained++; continue; }
     const { hmac: _omit, ...rest } = ev;
     if (rest.prev_hmac !== prev) {
       errors.push({ position: pos, message: `prev_hmac mismatch at line ${pos}: expected ${prev.slice(0, 12)}... got ${(rest.prev_hmac || '').slice(0, 12)}...` });
-      // continue to compute, but flag
     }
     let key;
     try { key = loadAuditKey(joshRoot, rest.key_id); }
-    catch (e) { errors.push({ position: pos, message: `missing audit key ${rest.key_id}` }); prev = stored; continue; }
+    catch (e) { errors.push({ position: pos, message: `missing audit key ${rest.key_id}` }); prev = stored; chained++; continue; }
     const canonical = canonicalJson(rest);
     const computed = crypto.createHmac('sha256', key).update(Buffer.from(prev, 'hex')).update(canonical).digest('hex');
     if (computed !== stored) {
       errors.push({ position: pos, message: `hmac mismatch at line ${pos}: expected ${computed.slice(0, 12)}... got ${stored.slice(0, 12)}...` });
     }
     prev = stored;
+    chained++;
   }
-  return { valid: errors.length === 0, chain_length: lines.length, errors };
+  return { valid: errors.length === 0, chain_length: lines.length, chained, unchained, errors };
 }
 
 // Lightweight ULID that avoids depending on josh.js.
