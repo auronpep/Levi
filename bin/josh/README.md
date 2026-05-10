@@ -275,6 +275,52 @@ Each speculative worktree is a real `git worktree`. Agents run in their own chec
 
 Every `josh tick` calls `sweepWorktrees` against `done/`, `failed/`, `cancelled/`. For each todo with one or more `worktree-*/` siblings, it tries `git worktree remove --force`, runs `git worktree prune` (clears stale registry entries from folder renames), deletes the agent branch, and removes the worktree directory. Reported as `worktrees_swept=N` in tick summary.
 
+## Cryptographic audit (Phase 6)
+
+Two layered cryptographic guarantees, both required at read time.
+
+### Layer 1: HMAC chain on the audit log
+
+Each line of `~/.josh/audit/<YYYY-MM-DD>.jsonl` is computed as:
+
+```
+canonical = canonicalJson(event_minus_hmac)        # see lib/canonical-json.js (locked v1)
+hmac_i    = HMAC_SHA256(audit_key_<key_id>, prev_hmac_bytes || canonical_bytes)
+```
+
+- `audit_key` is 32 random bytes at `~/.josh/keys/audit-<key_id>.key` (mode `0o600`).
+- Genesis: `prev_hmac = 32 zero bytes`.
+- Key rotation: `josh audit rotate-key [--id YYYY-MM]` mints a new key and appends a literal `audit.key_rotated` event.
+- Verify: `josh audit verify <YYYY-MM-DD>` walks the chain forward. Returns `{valid, chain_length, errors[{position, message}]}`.
+
+### Layer 2: Ed25519-signed verdicts
+
+Every Phase 4 verdict envelope is signed by the issuing agent's Ed25519 key.
+
+- Per-agent identity at `~/.josh/agents/<id>/identity.key` (raw 32B seed, mode `0o600`) and `~/.josh/agents/<id>/pubkey.jwk` (public).
+- DID = `did:key:z<base64url(pubkey_32B)>`.
+- Signature = JWS-compact with `alg:EdDSA`, `kid:<did>`. Payload binds `aud:"josh:audit"`, `iat`, `nbf`, `brief_hash` (sha256 of source brief), `verdict_id`, `agent_id`, `status`, `confidence`.
+- Verify: `josh verdict verify <todo-id> [<agent-id>]` re-loads the agent's pubkey, runs JWS verify, asserts `brief_hash` in the signed payload matches `envelope.brief_hash`. Tampered envelopes → INVALID.
+
+### Delegation chain (sub-agents)
+
+When a parent agent (e.g. A01) spawns an ephemeral sub-agent for verdict gathering, the parent issues a JWS-compact VC with `{sub, act, delegate_to, scope, expires_at}`. Verifier walks: ephemeral signature against ephemeral pubkey → VC against parent pubkey → check `expires_at` and required scope. See `bin/josh/lib/delegation.js`.
+
+### CLI
+
+```
+josh agent mint <agent-id> [--rotate]    Mint Ed25519 keypair + DID; patch manifest
+josh agent show <agent-id>               Show DID + pubkey path + brief_hash
+josh audit verify <YYYY-MM-DD>           Verify HMAC chain
+josh audit rotate-key [--id YYYY-MM]     Mint a new audit key
+josh audit list-keys                     List audit keys present
+josh verdict verify <todo-id> [<agent>]  Verify Ed25519 signatures on envelopes
+```
+
+### Phase 6.5 (deferred)
+
+OS-keychain wrap for key files (Windows DPAPI / macOS Keychain). v1 ships with file-perm isolation only.
+
 ## Operations: hybrid scheduler
 
 The orchestrator runs as **two cooperating schedulers**:

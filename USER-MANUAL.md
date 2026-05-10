@@ -751,6 +751,36 @@ Now requires a valid `handoff.md` in the todo folder unless `--skip-handoff` is 
 
 Each todo folder carries an append-only `events.ndjson` for the 14-event taxonomy (5 lifecycle: `start`/`heartbeat`/`done`/`failed`/`interrupted`; 9 stream: `backend_ref`/`run_started`/`text_delta`/`tool_call`/`pending_input`/`pending_input_resolved`/`plan_artifact`/`settings_changed`/`run_completed`). Phase 2A ships only the append helper (`bin/josh/lib/events-writer.js`); session-side emission is wired by future code.
 
+### 7.19 Cryptographic audit (Phase 6)
+
+Two layers, both required at read time. HMAC chain (we build) detects any tamper at the exact line; Ed25519 signatures (per-agent) prevent forgery even with valid HMAC.
+
+#### CLI
+
+- `josh agent mint <agent-id> [--rotate]` — Ed25519 keypair, DID, manifest patch.
+- `josh agent show <agent-id>` — DID + pubkey path + brief_hash.
+- `josh audit verify <YYYY-MM-DD>` — HMAC chain verify, errors with line numbers.
+- `josh audit rotate-key [--id YYYY-MM]` — mint new key + emit `audit.key_rotated` event.
+- `josh audit list-keys` — list keys present at `~/.josh/keys/`.
+- `josh verdict verify <todo-id> [<agent-id>]` — Ed25519 sig verify on envelopes.
+
+#### Algorithms (locked v1)
+
+- **Canonical JSON**: stable-key-sort, no whitespace, recursive (`bin/josh/lib/canonical-json.js`).
+- **HMAC chain**: `hmac_i = HMAC_SHA256(audit_key, prev_hmac || canonical_json_bytes(event_minus_hmac))`.
+- **Ed25519 signing**: JWS-compact `alg:EdDSA`, `kid:<did>`. Payload binds `aud`, `iat`, `nbf`, `brief_hash`, `verdict_id`.
+- **DID**: `did:key:z<base64url(pubkey_32B)>` (project-specific variant per spec §9.2).
+
+#### File layout
+
+```
+~/.josh/keys/audit-<YYYY-MM>.key    # 32 raw bytes, mode 0o600
+~/.josh/agents/<id>/identity.key    # 32 raw bytes, mode 0o600
+~/.josh/agents/<id>/pubkey.jwk      # OKP/Ed25519 JWK
+```
+
+Phase 6.5 (deferred): OS-keychain wrap for key files (Windows DPAPI / macOS Keychain).
+
 ### 7.18 Speculative parallel execution (Phase 5)
 
 For matrix-mode todos, `josh claim --speculative N <todo-id> --agent <id>` forks N git worktrees so candidate verdicts can run in isolation against the same base repo.
