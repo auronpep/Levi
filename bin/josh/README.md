@@ -254,6 +254,27 @@ josh matrix pending
 
 `~/.josh/agents/<id>/trust.json` — rolling per-dimension agreement rate, updated every matrix run. Used by Phase 7 spec-evolver as a degradation signal.
 
+## Speculative parallel execution (Phase 5)
+
+For matrix-mode todos, fan out N parallel claims into git worktrees so candidate verdicts can run in isolation against the same source.
+
+```
+josh claim <todo-id> --agent A03 --speculative 3 \
+  [--base-repo /path/to/repo] [--base-branch main] --as A03
+```
+
+- Requires `--agent`. Refuses without it.
+- `--speculative N` must be in `[2, 10]`.
+- Resolves `meta.context.repo` (or `--base-repo`) and `meta.context.branch` (or `--base-branch`, default `main`).
+- For i in 1..N: creates `~/.josh/todo/claimed/<todoId>/worktree-<i>/` on a fresh branch `agent/<short-todoId>-<i>`.
+- Records the worktree paths + branches in `runtime.json.worktrees`.
+
+Each speculative worktree is a real `git worktree`. Agents run in their own checkout; only the verdict envelopes (written to `~/.josh/todo/<id>/verdicts/<agent>.json`) come back into the main filesystem for the matrix layer to adjudicate.
+
+### Branch hygiene
+
+Every `josh tick` calls `sweepWorktrees` against `done/`, `failed/`, `cancelled/`. For each todo with one or more `worktree-*/` siblings, it tries `git worktree remove --force`, runs `git worktree prune` (clears stale registry entries from folder renames), deletes the agent branch, and removes the worktree directory. Reported as `worktrees_swept=N` in tick summary.
+
 ## Operations: hybrid scheduler
 
 The orchestrator runs as **two cooperating schedulers**:

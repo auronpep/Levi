@@ -751,6 +751,19 @@ Now requires a valid `handoff.md` in the todo folder unless `--skip-handoff` is 
 
 Each todo folder carries an append-only `events.ndjson` for the 14-event taxonomy (5 lifecycle: `start`/`heartbeat`/`done`/`failed`/`interrupted`; 9 stream: `backend_ref`/`run_started`/`text_delta`/`tool_call`/`pending_input`/`pending_input_resolved`/`plan_artifact`/`settings_changed`/`run_completed`). Phase 2A ships only the append helper (`bin/josh/lib/events-writer.js`); session-side emission is wired by future code.
 
+### 7.18 Speculative parallel execution (Phase 5)
+
+For matrix-mode todos, `josh claim --speculative N <todo-id> --agent <id>` forks N git worktrees so candidate verdicts can run in isolation against the same base repo.
+
+```
+josh claim <todo-id> --agent A03 --speculative 3 \
+  [--base-repo <path>] [--base-branch <branch>] --as A03
+```
+
+Requires `--agent` and `N ∈ [2, 10]`. Resolves `meta.context.repo`/`meta.context.branch` (or the `--base-*` flags). Each worktree is on a fresh `agent/<short-todo>-<i>` branch under `~/.josh/todo/claimed/<id>/worktree-<i>/`. Paths and branches are recorded in `runtime.json.worktrees`.
+
+`josh tick` calls `sweepWorktrees` against `done/`, `failed/`, `cancelled/` — every worktree of a terminal todo gets removed (path + branch + git registry pruned). Reported as `worktrees_swept=N`.
+
 ### 7.17 Verdict matrix (Phase 4)
 
 Phase 4 adds the multi-specialist verdict matrix per spec §8: N=3 candidate dispatch, E08 adjudication (never voting), gold-set replay, rolling trust scores, trigger tokens, token-budget cost math.
