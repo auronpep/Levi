@@ -39,3 +39,17 @@ Append-only journal of the autonomous Phase 3 → Phase 10 rollout. One section 
 - **Started:** (next)
 - **Branch:** `claude/josh-phase5-speculative` (off Phase 4 HEAD)
 - **Plan doc:** `2026-05-10-josh-speculative-phase5.md`
+- **Status:** SHIPPED → PR (pending push)
+- **Commits:** 2
+- **Tests:** 159 pass / 0 fail / 1 skipped
+- **Shipped:** worktree.js (create/remove/list/sweep), `josh claim --speculative N`, tick worktree sweep, speculative smoke test, docs.
+- **Surprises:** First smoke run failed because git's worktree registry breaks when the parent folder is renamed (claimed/ → done/). Fix: use `runtime.json.worktrees` for branch metadata + `git worktree prune` to clean stale registry entries before `git branch -D`.
+- **Deferred to Phase 5B:** auto-trigger speculative on cost-data threshold; hard-kill mid-flight at 2× predicted budget (needs Phase 9 cost telemetry).
+
+---
+
+## Phase 6 — Cryptographic audit
+
+- **Started:** (next)
+- **Branch:** `claude/josh-phase6-crypto` (off Phase 5 HEAD)
+- **Plan doc:** `2026-05-10-josh-crypto-phase6.md`
