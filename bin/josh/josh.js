@@ -1403,10 +1403,11 @@ function cmdComplete(args) {
     parsed = parseArgs({
       args,
       options: {
-        as:            { type: 'string' },
-        actor:         { type: 'string' },
-        note:          { type: 'string' },
-        'skip-verify': { type: 'boolean' }
+        as:             { type: 'string' },
+        actor:          { type: 'string' },
+        note:           { type: 'string' },
+        'skip-verify':  { type: 'boolean' },
+        'skip-handoff': { type: 'boolean' },
       },
       allowPositionals: true,
       strict: true
@@ -1418,7 +1419,7 @@ function cmdComplete(args) {
 
   const actor = resolveActor(parsed.values);
 
-  // Locate first so we can run verify before the move.
+  // Locate first so we can run verify + handoff check before the move.
   const located = locateTodo(idArg, ['in_progress']);
   if (located.error) return errExit(located.error, located.code);
 
@@ -1433,6 +1434,22 @@ function cmdComplete(args) {
       err(`exit code: ${e.status}`);
       if (e.stderr) err(`stderr: ${e.stderr.toString().trim()}`);
       return errExit('verification failed; not completing. use --skip-verify to override or `josh fail` to mark failed', 1);
+    }
+  }
+
+  // Handoff check (Phase 2A): handoff.md must exist + validate, unless --skip-handoff.
+  if (!parsed.values['skip-handoff']) {
+    const handoffPath = path.join(located.folder, 'handoff.md');
+    if (!fs.existsSync(handoffPath)) {
+      return errExit(`handoff.md not found at ${path.relative(JOSH_ROOT, handoffPath).replace(/\\/g, '/')}; write the 9-field handoff before completing (or pass --skip-handoff)`, 1);
+    }
+    const text = fs.readFileSync(handoffPath, 'utf8');
+    const { validateHandoff } = require('./lib/handoff-validator');
+    const v = validateHandoff(text);
+    if (!v.ok) {
+      err('handoff.md validation failed:');
+      for (const e of v.errors) err(`  - ${e}`);
+      return 1;
     }
   }
 

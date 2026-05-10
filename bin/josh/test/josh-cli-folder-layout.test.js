@@ -209,3 +209,47 @@ test('cli: tick promotes approved → in_progress', () => {
 
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+test('cli: complete rejects when handoff.md missing', () => {
+  const root = setupRoot();
+  // Push, tick, claim (legacy path, no --agent → in_progress)
+  const out = runCli('push todo "no-handoff"', { JOSH_ROOT: root });
+  const id = out.trim().split('\n').filter(Boolean).pop().trim();
+  runCli('tick', { JOSH_ROOT: root });
+  runCli(`claim ${id} --as worker`, { JOSH_ROOT: root });
+
+  let err = null;
+  try { runCli(`complete ${id} --as worker`, { JOSH_ROOT: root }); } catch (e) { err = e; }
+  assert.ok(err, 'expected complete to fail without handoff.md');
+  assert.match(err.stderr.toString(), /handoff\.md/);
+  // Still in in_progress
+  assert.equal(fs.existsSync(path.join(root, 'todo', 'in_progress', id, 'meta.json')), true);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('cli: complete accepts a valid handoff.md', () => {
+  const root = setupRoot();
+  const out = runCli('push todo "with-handoff"', { JOSH_ROOT: root });
+  const id = out.trim().split('\n').filter(Boolean).pop().trim();
+  runCli('tick', { JOSH_ROOT: root });
+  runCli(`claim ${id} --as worker`, { JOSH_ROOT: root });
+  // Drop the handoff fixture in place
+  const handoffSource = fs.readFileSync(path.join(__dirname, 'fixtures/sample-handoff.md'), 'utf8');
+  fs.writeFileSync(path.join(root, 'todo', 'in_progress', id, 'handoff.md'), handoffSource);
+  runCli(`complete ${id} --as worker`, { JOSH_ROOT: root });
+
+  assert.equal(fs.existsSync(path.join(root, 'todo', 'done', id, 'meta.json')), true);
+  assert.equal(fs.existsSync(path.join(root, 'todo', 'done', id, 'handoff.md')), true);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('cli: complete --skip-handoff bypasses validation', () => {
+  const root = setupRoot();
+  const out = runCli('push todo "skip-handoff"', { JOSH_ROOT: root });
+  const id = out.trim().split('\n').filter(Boolean).pop().trim();
+  runCli('tick', { JOSH_ROOT: root });
+  runCli(`claim ${id} --as worker`, { JOSH_ROOT: root });
+  runCli(`complete ${id} --as worker --skip-handoff`, { JOSH_ROOT: root });
+  assert.equal(fs.existsSync(path.join(root, 'todo', 'done', id, 'meta.json')), true);
+  fs.rmSync(root, { recursive: true, force: true });
+});
