@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 
+const tf = require('./todo-folder');
+
 function readJson(p) {
   return JSON.parse(fs.readFileSync(p, 'utf8'));
 }
@@ -16,17 +18,16 @@ function renderDailyReview(projectId, opts = {}) {
   }
   const charter = readJson(charterPath);
 
-  const states = ['incoming', 'triaged', 'in_progress', 'done', 'blocked', 'failed', 'cancelled'];
+  const states = [
+    'incoming', 'triaged', 'claimed', 'planning', 'awaiting_approval',
+    'approved', 'rejected', 'revised', 'in_progress', 'done',
+    'blocked', 'failed', 'cancelled',
+  ];
   const counts = {};
   const byDay = {};
   for (const state of states) {
     counts[state] = 0;
-    const dir = path.join(joshRoot, 'todo', state);
-    if (!fs.existsSync(dir)) continue;
-    for (const file of fs.readdirSync(dir)) {
-      if (!file.endsWith('.json')) continue;
-      let todo;
-      try { todo = readJson(path.join(dir, file)); } catch (e) { continue; }
+    for (const todo of tf.listTodosInState(joshRoot, state)) {
       if (todo.project_id !== projectId) continue;
       counts[state]++;
       const dayKey = `Day ${todo.day}`;
