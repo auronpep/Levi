@@ -717,6 +717,40 @@ Re-parses all source paths referenced by the project's agents and todos, updates
 
 Reported counts: `changed` (source differs), `missing` (source path no longer exists — surfaced, not auto-cleaned), `updated` (writes performed).
 
+### 7.15 Agent dispatch (plan-approve-execute)
+
+The Phase 2A lifecycle for an agent picking up a triaged todo, drafting a plan, getting human approval, executing, and handing off. See `bin/josh/README.md` for folder-layout details.
+
+#### `josh claim <id> --agent <agent-id> [--as actor] [--ttl 3600]`
+
+Atomically transitions a `triaged` todo to `claimed` if `meta.primary_role` matches `--agent`. Stamps `meta.agent_brief_path` with the absolute path to the agent's source brief (resolved via `~/.josh/agents/<id>/manifest.json`) and writes `runtime.json` into the todo folder with `harness`, `session_id`, `claimed_by`, `started_at`.
+
+Without `--agent`, retains the legacy claim semantics (`triaged → in_progress`, no brief injection).
+
+#### `josh plan submit <todo-id> --plan <path> [--as actor]`
+
+Validates the plan file against the 8-section kesslerio template (frontmatter `id`/`status`/`claimed_by`/`plan_hash`; H2 sections in order: `Fast-Path`, `Problem statement`, `Current state evidence`, `Proposed approach`, `Step-by-step change list`, `Risks + rollback`, `Test plan`, `Approval prompt`). On pass: copies the plan into the todo folder as `plan.md`, writes `plan-review.json`, writes `approval` file containing `pending`, transitions `claimed → awaiting_approval`.
+
+#### `josh plan approve <todo-id> [--as actor] [--note "..."]`
+
+Transitions `awaiting_approval → approved`. Updates the `approval` signal file to `approved`. Next `josh tick` will auto-promote the todo to `in_progress`.
+
+#### `josh plan reject <todo-id> --reason "..." [--as actor]`
+
+Transitions `awaiting_approval → rejected` (terminal). Writes the rejection reason into `meta.plan_rejection_reason` and updates the `approval` signal file to `rejected`.
+
+#### Tick auto-promotion
+
+Each `josh tick` walks `~/.josh/todo/approved/`. For every todo whose `approval` file equals `approved`, the tick atomically moves the folder to `in_progress` and writes a `todo.auto_promoted` audit event. No model-side string-matching; only the orchestrator promotes.
+
+#### `josh complete <todo-id> [--note "..."] [--skip-handoff] [--skip-verify]`
+
+Now requires a valid `handoff.md` in the todo folder unless `--skip-handoff` is passed. The handoff must contain all 9 H2 fields (`Task ID`, `Files changed`, `Decision`, `Open blockers`, `Risks`, `Downstream unblocked`, `Downstream blocked`, `Verification`, `Human review`), each with a non-empty body. On pass: transitions `in_progress → done`. The `handoff.md` file follows the folder into the `done` directory.
+
+#### Event stream — `events.ndjson`
+
+Each todo folder carries an append-only `events.ndjson` for the 14-event taxonomy (5 lifecycle: `start`/`heartbeat`/`done`/`failed`/`interrupted`; 9 stream: `backend_ref`/`run_started`/`text_delta`/`tool_call`/`pending_input`/`pending_input_resolved`/`plan_artifact`/`settings_changed`/`run_completed`). Phase 2A ships only the append helper (`bin/josh/lib/events-writer.js`); session-side emission is wired by future code.
+
 ---
 
 ## 8. The `~/.josh/` runtime

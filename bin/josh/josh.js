@@ -3116,6 +3116,16 @@ function cmdHelp() {
   log(`  josh project status [--project ID]         render the daily-review template`);
   log(`  josh project sync   [--project ID] [--dry-run]   refresh imported entities from source`);
   log(``);
+  log(`agent dispatch (Phase 2A — plan/approve/execute):`);
+  log(`  claim <id> --agent A01 [--as actor] [--ttl 3600]`);
+  log(`         triaged → claimed; injects agent brief reference + writes runtime.json`);
+  log(`  plan submit <id> --plan <path> [--as actor]    claimed → awaiting_approval`);
+  log(`  plan approve <id> [--as actor] [--note "..."]  awaiting_approval → approved`);
+  log(`  plan reject <id> --reason "..." [--as actor]   awaiting_approval → rejected`);
+  log(`  complete <id> [--note "..."] [--skip-handoff] [--skip-verify]`);
+  log(`         in_progress → done; requires valid 9-field handoff.md`);
+  log(`         (next 'josh tick' auto-promotes approved → in_progress)`);
+  log(``);
   log(`  help                          show this message`);
   log(`  version                       show CLI version`);
   log(``);
