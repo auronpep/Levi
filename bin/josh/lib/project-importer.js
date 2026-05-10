@@ -105,7 +105,7 @@ function ensureDir(dir) {
 }
 
 function writeJsonAtomic(p, obj) {
-  const tmp = p + '.tmp.' + process.pid;
+  const tmp = p + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
   fs.renameSync(tmp, p);
 }

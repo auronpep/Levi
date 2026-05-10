@@ -9,7 +9,7 @@ const { parseAgent, parseTask } = require('./project-importer');
 function readJson(p) { return JSON.parse(fs.readFileSync(p, 'utf8')); }
 
 function writeJsonAtomic(p, obj) {
-  const tmp = p + '.tmp.' + process.pid;
+  const tmp = p + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
   fs.renameSync(tmp, p);
 }
