@@ -16,3 +16,27 @@ test('parseCharter: extracts title, definition_of_done, days', () => {
   assert.match(result.days[0].goal, /launch definition/);
   assert.equal(result.source_path, path.resolve(path.join(FIXTURE_DISPATCH, 'README.md')));
 });
+
+const { parseTask } = require('../lib/project-importer');
+
+test('parseTask: extracts display_id, title, dispatch metadata', () => {
+  const taskPath = path.join(FIXTURE_DISPATCH, 'day_1_lock_scope_and_command', 'D1-001_freeze_four_day_launch_definition.md');
+  const result = parseTask(taskPath);
+  assert.equal(result.display_id, 'D1-001');
+  assert.equal(result.title, 'Freeze four-day launch definition');
+  assert.equal(result.day, 1);
+  assert.equal(result.phase, 1);
+  assert.equal(result.primary_role, 'A01');
+  assert.deepEqual(result.depends_on_display_ids, []);
+  assert.deepEqual(result.blocks_display_ids, ['D1-002']);
+  assert.match(result.parallel_safety, /same phase/);
+  assert.equal(result.source_path, path.resolve(taskPath));
+});
+
+test('parseTask: D1-003 has D1-002 as upstream', () => {
+  const taskPath = path.join(FIXTURE_DISPATCH, 'day_1_lock_scope_and_command', 'D1-003_map_dependency_chain.md');
+  const result = parseTask(taskPath);
+  assert.equal(result.display_id, 'D1-003');
+  assert.deepEqual(result.depends_on_display_ids, ['D1-002']);
+  assert.deepEqual(result.blocks_display_ids, ['D1-004']);
+});

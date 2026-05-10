@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { parseDispatchBlock } = require('./markdown-parser');
 
 function parseCharter(readmePath) {
   const text = fs.readFileSync(readmePath, 'utf8');
@@ -36,4 +37,29 @@ function parseCharter(readmePath) {
   };
 }
 
-module.exports = { parseCharter };
+function parseTask(taskPath) {
+  const text = fs.readFileSync(taskPath, 'utf8');
+  const filename = path.basename(taskPath, '.md');
+  const displayIdMatch = filename.match(/^(D\d+-\d+)/);
+  const display_id = displayIdMatch ? displayIdMatch[1] : null;
+
+  const headingMatch = text.match(/^#\s+.+?Task\s+\d+:\s+(.+)$/m);
+  const title = headingMatch ? headingMatch[1].trim() : filename;
+
+  const dispatch = parseDispatchBlock(text) || {};
+
+  return {
+    display_id,
+    title,
+    day: dispatch.day,
+    phase: dispatch.phase_num,
+    phase_name: dispatch.phase_name,
+    primary_role: dispatch.primary_role,
+    depends_on_display_ids: dispatch.required_order ? dispatch.required_order.after : [],
+    blocks_display_ids: dispatch.required_order ? dispatch.required_order.before : [],
+    parallel_safety: dispatch.parallel_safety,
+    source_path: path.resolve(taskPath),
+  };
+}
+
+module.exports = { parseCharter, parseTask };
