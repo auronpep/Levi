@@ -2629,8 +2629,40 @@ function cmdProjectStatus(args) {
 }
 
 function cmdProjectSync(args) {
-  err('not yet implemented (Task 14)');
-  return 1;
+  const { applySync } = require('./lib/project-sync');
+  let projectId = null;
+  let dryRun = false;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--project') projectId = args[++i];
+    else if (args[i] === '--dry-run') dryRun = true;
+  }
+  if (!projectId) {
+    const projectsDir = path.join(JOSH_ROOT, 'projects');
+    if (!fs.existsSync(projectsDir)) {
+      err('no projects imported yet');
+      return 2;
+    }
+    const ids = fs.readdirSync(projectsDir).filter((d) =>
+      fs.statSync(path.join(projectsDir, d)).isDirectory()
+    );
+    if (ids.length === 0) { err('no projects imported yet'); return 2; }
+    if (ids.length > 1) {
+      err('multiple projects exist; specify one with --project <id>');
+      return 1;
+    }
+    projectId = ids[0];
+  }
+  try {
+    const result = applySync(projectId, { joshRoot: JOSH_ROOT, actor: defaultActor(), dryRun });
+    log(`sync ${result.dry_run ? '(dry-run) ' : ''}for project ${result.project_id}`);
+    log(`  agents:  changed=${result.agents_changed} missing=${result.agents_missing} updated=${result.agents_updated}`);
+    log(`  tasks:   changed=${result.tasks_changed} missing=${result.tasks_missing} updated=${result.tasks_updated}`);
+    return 0;
+  } catch (e) {
+    err(e.message);
+    if (process.env.JOSH_DEBUG) err(e.stack);
+    return 4;
+  }
 }
 
 function cmdHelp() {
