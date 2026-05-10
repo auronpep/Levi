@@ -751,6 +751,37 @@ Now requires a valid `handoff.md` in the todo folder unless `--skip-handoff` is 
 
 Each todo folder carries an append-only `events.ndjson` for the 14-event taxonomy (5 lifecycle: `start`/`heartbeat`/`done`/`failed`/`interrupted`; 9 stream: `backend_ref`/`run_started`/`text_delta`/`tool_call`/`pending_input`/`pending_input_resolved`/`plan_artifact`/`settings_changed`/`run_completed`). Phase 2A ships only the append helper (`bin/josh/lib/events-writer.js`); session-side emission is wired by future code.
 
+### 7.16 Enforcement layer (Phase 3)
+
+Phase 3 guardrails ensure dispatch tasks run safely across multiple phases without collisions or runaway retries.
+
+#### Hard-dependency enforcement
+
+`josh claim <id>` checks `meta.depends_on` for any entries with `kind: hard` whose target todo is not in `done/`. If any are unfinished, the claim is refused with exit code **3** and a message naming the blockers. Soft dependencies (`kind: soft`) are advisory and not checked.
+
+#### Backpressure caps
+
+Configure caps at `~/.josh/orchestrator/backpressure.json`:
+
+```json
+{
+  "schema": 1,
+  "max_concurrent": 10,
+  "max_concurrent_per_phase": 5,
+  "max_concurrent_per_agent": 2
+}
+```
+
+Defaults apply when the file is absent. `josh claim` refuses (exit **3**) when any cap would be exceeded; `josh tick`'s promotion step holds back `approved → in_progress` moves until the cap clears, surfacing `throttled=N` in the summary.
+
+#### Doom-loop detector
+
+`josh tick` automatically moves any todo with ≥ 3 `failed` history events into `blocked/`, with `meta.blocked_reason: doom-loop-detected:N`. The threshold is the constant `DEFAULT_MAX_FAILURES = 3` in `bin/josh/lib/doom-loop.js`. The sweep runs against `failed/` and `triaged/` (catching re-triaged loops). Reported as `doom_looped=N` in the tick summary when nonzero.
+
+#### `josh heartbeat <id> [--as <actor>]`
+
+Resets `meta.claim.at` to now (extending TTL by another full `claim.ttl_sec`) and emits a `kind: heartbeat` event into the per-todo `events.ndjson` plus a history entry. Allowed source states: `claimed`, `planning`, `awaiting_approval`, `in_progress`. Anywhere else returns exit **1**. Use from inside an agent session that's expected to run longer than the configured TTL.
+
 ---
 
 ## 8. The `~/.josh/` runtime
