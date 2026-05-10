@@ -92,8 +92,21 @@ test('importProject: writes charter, todos, agent manifests under JOSH_ROOT', ()
   assert.equal(a01.version, 1);
   assert.match(a01.source_path_hash, /^[a-f0-9]{64}$/);
 
-  const triaged = fs.readdirSync(path.join(tmpRoot, 'todo', 'triaged'));
-  assert.equal(triaged.length, 2);
+  // Verify todos written to triaged/<id>/meta.json (folder layout)
+  const triaged = fs.readdirSync(path.join(tmpRoot, 'todo', 'triaged'), { withFileTypes: true });
+  const todoDirs = triaged.filter((e) => e.isDirectory());
+  assert.equal(todoDirs.length, 2, `expected 2 todo folders, got ${todoDirs.length}`);
+  for (const e of todoDirs) {
+    const metaPath = path.join(tmpRoot, 'todo', 'triaged', e.name, 'meta.json');
+    assert.equal(fs.existsSync(metaPath), true, `meta.json missing for ${e.name}`);
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+    assert.equal(meta.id, e.name, `meta.id mismatch for ${e.name}`);
+    // state sibling exists and matches dir
+    const stateFile = path.join(tmpRoot, 'todo', 'triaged', e.name, 'state');
+    assert.equal(fs.readFileSync(stateFile, 'utf8').trim(), 'triaged');
+    // events.ndjson sibling exists (empty file is fine)
+    assert.equal(fs.existsSync(path.join(tmpRoot, 'todo', 'triaged', e.name, 'events.ndjson')), true);
+  }
 
   const auditFiles = fs.readdirSync(path.join(tmpRoot, 'audit'));
   assert.ok(auditFiles.length > 0);

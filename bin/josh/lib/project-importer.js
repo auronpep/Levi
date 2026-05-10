@@ -250,7 +250,12 @@ function importProject(corpusPath, opts = {}) {
       created_by: actor,
       history: [{ at: now, actor, event: 'imported' }],
     };
-    writeJsonAtomic(path.join(triagedDir, `${todo_id}.json`), todoData);
+    const todoDir = path.join(triagedDir, todo_id);
+    ensureDir(todoDir);
+    writeJsonAtomic(path.join(todoDir, 'meta.json'), todoData);
+    fs.writeFileSync(path.join(todoDir, 'state'), 'triaged\n', 'utf8');
+    // Touch an empty events.ndjson so the append helper has a file to grow.
+    fs.writeFileSync(path.join(todoDir, 'events.ndjson'), '', 'utf8');
 
     appendAuditEvent(joshRoot, {
       schema: 1,
