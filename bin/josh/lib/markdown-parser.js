@@ -18,4 +18,24 @@ function extractFrontmatter(text) {
   return { frontmatter, body };
 }
 
-module.exports = { extractFrontmatter };
+function parseRequiredOrder(text) {
+  const result = { after: [], before: [] };
+  if (!text) return result;
+  const afterMatch = text.match(/after\s+(.+?)(?:,\s*before|$)/i);
+  const beforeMatch = text.match(/before\s+(.+)$/i);
+  const extractIds = (s) => {
+    if (!s) return [];
+    const ids = [];
+    const re = /`([^`]+)`/g;
+    let m;
+    while ((m = re.exec(s)) !== null) {
+      if (m[1] !== 'none') ids.push(m[1]);
+    }
+    return ids;
+  };
+  result.after = extractIds(afterMatch ? afterMatch[1] : '');
+  result.before = extractIds(beforeMatch ? beforeMatch[1] : '');
+  return result;
+}
+
+module.exports = { extractFrontmatter, parseRequiredOrder };

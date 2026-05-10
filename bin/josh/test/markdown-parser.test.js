@@ -28,3 +28,29 @@ test('extractFrontmatter: trims values', () => {
   const result = extractFrontmatter(input);
   assert.equal(result.frontmatter.name, 'bar');
 });
+
+const { parseRequiredOrder } = require('../lib/markdown-parser');
+
+test('parseRequiredOrder: simple after/before', () => {
+  const result = parseRequiredOrder('after `D1-002`, before `D1-004`');
+  assert.deepEqual(result.after, ['D1-002']);
+  assert.deepEqual(result.before, ['D1-004']);
+});
+
+test('parseRequiredOrder: after none', () => {
+  const result = parseRequiredOrder('after `none`, before `D1-002`');
+  assert.deepEqual(result.after, []);
+  assert.deepEqual(result.before, ['D1-002']);
+});
+
+test('parseRequiredOrder: multiple ids', () => {
+  const result = parseRequiredOrder('after `D1-001` and `D1-002`, before `D1-004`');
+  assert.deepEqual(result.after, ['D1-001', 'D1-002']);
+  assert.deepEqual(result.before, ['D1-004']);
+});
+
+test('parseRequiredOrder: empty input', () => {
+  const result = parseRequiredOrder('');
+  assert.deepEqual(result.after, []);
+  assert.deepEqual(result.before, []);
+});
