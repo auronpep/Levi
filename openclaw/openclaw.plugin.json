@@ -1,0 +1,9 @@
+{
+  "id": "levi-tool-knowledge",
+  "name": "Levi Tool Knowledge",
+  "description": "Per-tool skills (capability surface, auth, errors, traps, lessons) sourced from the Levi plugin. Skills are matched by the operator's situation via the description field. For per-Bash-call enforcement, configure bootstrap-extra-files to include TRIGGER.md from this pack.",
+  "enabledByDefault": true,
+  "skills": [
+    "./skills"
+  ]
+}
