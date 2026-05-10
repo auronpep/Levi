@@ -9,5 +9,8 @@
     "node": ">=18.0.0"
   },
   "type": "commonjs",
-  "license": "MIT"
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test test/"
+  }
 }
