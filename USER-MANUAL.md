@@ -751,6 +751,36 @@ Now requires a valid `handoff.md` in the todo folder unless `--skip-handoff` is 
 
 Each todo folder carries an append-only `events.ndjson` for the 14-event taxonomy (5 lifecycle: `start`/`heartbeat`/`done`/`failed`/`interrupted`; 9 stream: `backend_ref`/`run_started`/`text_delta`/`tool_call`/`pending_input`/`pending_input_resolved`/`plan_artifact`/`settings_changed`/`run_completed`). Phase 2A ships only the append helper (`bin/josh/lib/events-writer.js`); session-side emission is wired by future code.
 
+### 7.17 Verdict matrix (Phase 4)
+
+Phase 4 adds the multi-specialist verdict matrix per spec §8: N=3 candidate dispatch, E08 adjudication (never voting), gold-set replay, rolling trust scores, trigger tokens, token-budget cost math.
+
+#### Envelope contract
+
+Each candidate writes `~/.josh/todo/<id>/verdicts/<agent>.json` with the §6.4 schema (status ∈ approve|hold|rewrite|reject, confidence ∈ [0,1], plus payload + cost). Validated by `bin/josh/lib/verdict-envelope.js`.
+
+#### CLI
+
+- `josh verdict submit <todo-id> --envelope <path>` — validate + write envelope. Auto-fires the matrix lifecycle on next tick.
+- `josh verdict list <todo-id>` — show all submitted envelopes (status, confidence, produced_at).
+- `josh verdict show <todo-id> [<agent-id>|winner]` — print full envelope JSON or `winner.json`.
+- `josh matrix status [--todo <id>]` — matrix progress (candidates / envelopes / winner).
+- `josh matrix pending` — list queued E08 adjudications.
+
+#### Tick lifecycle additions
+
+- **`matrix_queued=N`** — N todos hit the candidate-set threshold; queue files written to `~/.josh/E08/incoming/`.
+- **`matrix_winners=N`** — N todos had a `winner.json` materialized this tick, dissent archived, trust updated.
+- **`matrix_auto_accepted=N`** — N todos short-circuited via `JOSH_VERDICT_AUTO_ACCEPT` sentinel (confidence ≥ 0.9, risk ≠ high).
+
+#### Configuration
+
+`~/.josh/orchestrator/routing.json` extends with `matrix_rules` (label/phase → candidate list) and `default_matrix_candidates`. Per-agent `manifest.json.budget` enforces per-todo token ceiling (`MAX_TOKENS_PER_VERDICT = 50000`, summed across candidates).
+
+#### Calibration
+
+Per-agent gold sets at `~/.josh/agents/<id>/gold/*.json` drive `replayGold()` scoring. Trust scores at `~/.josh/agents/<id>/trust.json` accumulate per-dimension agreement rate across matrix runs.
+
 ### 7.16 Enforcement layer (Phase 3)
 
 Phase 3 guardrails ensure dispatch tasks run safely across multiple phases without collisions or runaway retries.
