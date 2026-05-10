@@ -50,6 +50,7 @@ function extractSections(body) {
 }
 
 function validatePlan(text) {
+  text = text.replace(/\r\n/g, '\n');
   const errors = [];
   const fm = parseFrontmatter(text);
   if (!fm.found) {

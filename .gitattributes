@@ -1,0 +1,2 @@
+# Test fixtures that contain LF-sensitive regex patterns must not be converted.
+bin/josh/test/fixtures/*.md text eol=lf
