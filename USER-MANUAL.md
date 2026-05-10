@@ -751,6 +751,41 @@ Now requires a valid `handoff.md` in the todo folder unless `--skip-handoff` is 
 
 Each todo folder carries an append-only `events.ndjson` for the 14-event taxonomy (5 lifecycle: `start`/`heartbeat`/`done`/`failed`/`interrupted`; 9 stream: `backend_ref`/`run_started`/`text_delta`/`tool_call`/`pending_input`/`pending_input_resolved`/`plan_artifact`/`settings_changed`/`run_completed`). Phase 2A ships only the append helper (`bin/josh/lib/events-writer.js`); session-side emission is wired by future code.
 
+### 7.21 Cross-runtime gateway (Phase 8)
+
+Three subsystems for letting external runtimes participate as first-class agents.
+
+#### MCP registry
+
+`josh tool register --id <id> [--command <c>] [--args <a,b>] [--cap <x,y>]` — append/update `~/.josh/mcp/registry.json`.
+
+`josh tool list` / `josh tool show <id>` / `josh tool unregister --id <id>`.
+
+#### Per-agent tool scoping
+
+`agents/<id>/manifest.json.allowed_tools` controls scope. Wildcards: `"mcp:*"` matches any `mcp:` tool. Missing/empty array = unrestricted (v1 default). `["*"]` = explicit full access.
+
+CLI:
+- `josh tool scope-add <agent-id> <tool-id>` / `josh tool scope-remove <agent-id> <tool-id>`
+- `josh tool scope-show <agent-id>`
+- `josh tool violation log --todo <id> --agent <id> --tool <tool> [--reason "..."]`
+
+`josh claim --agent` writes `runtime.json.allowed_tools` from the resolved scope for the runtime to honor at execution time.
+
+#### A2A HTTP bridge
+
+`josh a2a serve [--port N]` (default port 7843, override via `JOSH_A2A_PORT`). Bind is `127.0.0.1` only.
+
+Endpoints:
+- `GET /healthz`
+- `POST /agents/register` `{id, did, pubkey_jwk, allowed_tools, source_path}`
+- `POST /tasks/sendSubscribe` `{todo_id, agent_id}` (equivalent of `josh claim --agent`)
+- `GET /tasks/<todo-id>` (state + meta)
+
+`josh a2a stop` writes a flag file the running server polls and exits.
+
+Phase 8B deferred: TLS/auth on the bridge, runtime-side enforcement of tool scoping (today's check is declarative).
+
 ### 7.20 Spec-evolver meta-lane (Phase 7)
 
 Phase 7 implements spec §10: agent briefs evolve through plan-only iteration rounds with gold-set replay scoring; halt rules + approval drop + manual approve/reject. v1 in-scope agents: **A01, E00, E08**.

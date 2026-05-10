@@ -275,6 +275,58 @@ Each speculative worktree is a real `git worktree`. Agents run in their own chec
 
 Every `josh tick` calls `sweepWorktrees` against `done/`, `failed/`, `cancelled/`. For each todo with one or more `worktree-*/` siblings, it tries `git worktree remove --force`, runs `git worktree prune` (clears stale registry entries from folder renames), deletes the agent branch, and removes the worktree directory. Reported as `worktrees_swept=N` in tick summary.
 
+## Cross-runtime gateway (Phase 8)
+
+Per spec §11. Three pieces: an MCP server registry, per-agent tool scoping, and an A2A HTTP bridge for external (non–Claude-Code/Codex/OpenClaw) agents.
+
+### MCP registry
+
+```
+~/.josh/mcp/registry.json
+{
+  "schema": 1,
+  "servers": [
+    { "id": "mcp:duckdb", "command": "duckdb-mcp", "args": [], "capabilities": ["query", "export"] }
+  ]
+}
+```
+
+CLI: `josh tool register/unregister/list/show`.
+
+### Per-agent tool scoping
+
+Each `agents/<id>/manifest.json` may carry `allowed_tools: ["mcp:duckdb", "fs:read"]`. Wildcards: `"mcp:*"` matches any `mcp:` tool. Empty array OR missing field = full access (v1 backward-compat). `["*"]` = explicit full access.
+
+`josh claim --agent <id>` writes the resolved scope into `runtime.json.allowed_tools` for the runtime to honor. Out-of-scope use is logged via:
+
+```
+josh tool violation log --todo <id> --agent <id> --tool <tool-id> [--reason "..."]
+```
+
+This appends to `~/.josh/audit/violations-<date>.jsonl` and emits a `failed` lifecycle event (`reason: tool_scope_violation`) into the todo's `events.ndjson`.
+
+### A2A HTTP bridge
+
+```
+josh a2a serve [--port N]              Foreground daemon (default port 7843, env JOSH_A2A_PORT)
+josh a2a stop                          Signal stop via flag file
+josh a2a health [--port N]             Hit /healthz
+```
+
+Endpoints:
+- `GET /healthz` — `{ ok, version, mcp_servers }`.
+- `POST /agents/register` — `{id, did, pubkey_jwk, allowed_tools, source_path}` → mints/updates `agents/<id>/manifest.json` (and writes `pubkey.jwk` if provided).
+- `POST /tasks/sendSubscribe` — `{todo_id, agent_id}` → atomic `triaged → claimed`, writes `runtime.json.allowed_tools` from the agent manifest.
+- `GET /tasks/<todo_id>` — current state + meta.
+
+Bind is `127.0.0.1` only. Production hardening (TLS, auth, rate limits) deferred to Phase 8B.
+
+### Phase 8B (deferred)
+
+- Tool-scoping enforcement at the runtime boundary (today's check is declarative — runtime is expected to honor `runtime.json.allowed_tools`).
+- TLS + bearer-token auth on the A2A bridge.
+- agentgateway (binary) integration — not adopted; we build scoping primitives directly in josh per master design §1.5.
+
 ## Spec-evolver meta-lane (Phase 7)
 
 Per spec §10. When an agent's brief degrades or on manual trigger, queue a "plan-only" iteration that proposes a patched brief; josh runs the rounds, applies halt rules, and drops a PR-style approval. **`josh evolve approve`** swaps the brief and bumps `manifest.version`. Old verdicts still verify against the v1 `brief_hash` (Phase 6's signed-payload binding handles this automatically).
