@@ -275,6 +275,51 @@ Each speculative worktree is a real `git worktree`. Agents run in their own chec
 
 Every `josh tick` calls `sweepWorktrees` against `done/`, `failed/`, `cancelled/`. For each todo with one or more `worktree-*/` siblings, it tries `git worktree remove --force`, runs `git worktree prune` (clears stale registry entries from folder renames), deletes the agent branch, and removes the worktree directory. Reported as `worktrees_swept=N` in tick summary.
 
+## Spec-evolver meta-lane (Phase 7)
+
+Per spec §10. When an agent's brief degrades or on manual trigger, queue a "plan-only" iteration that proposes a patched brief; josh runs the rounds, applies halt rules, and drops a PR-style approval. **`josh evolve approve`** swaps the brief and bumps `manifest.version`. Old verdicts still verify against the v1 `brief_hash` (Phase 6's signed-payload binding handles this automatically).
+
+### v1 scope
+
+- Agents in v1: **A01, E00, E08** only. Pass `--allow-any` to override.
+- Triggers: manual + nightly cron only. Disagreement-threshold trigger is gated until ≥50 matrix runs of data accumulate.
+
+### Halt rules (verbatim §10.3)
+
+1. `pass_rate ≥ 0.95` AND `<NO_NEW_GAPS_FOUND>` two rounds in a row → **converged**
+2. brief > 250 lines after pruning → **bloating**
+3. regression detected (`pass_rate < prev_round.pass_rate`) → **regression** (revert to prev round, halt)
+4. N=8 hard ceiling → **max_rounds**
+
+### CLI
+
+```
+josh evolve start <agent-id> [--max-rounds 5] [--simulator <dir>] [--allow-any]
+josh evolve status [<evolve-id>]
+josh evolve list [--state active|pending_approval|done]
+josh evolve approve <evolve-id> [--as actor]
+josh evolve reject <evolve-id> --reason "..." [--as actor]
+
+josh lesson add <agent-id> "text" [--as actor]
+josh lesson list <agent-id>
+```
+
+Per-agent corrections accumulate at `~/.josh/agents/<id>/lessons.md` and are inherited as session context.
+
+### Approval drop layout
+
+```
+~/.josh/approvals/evolve-<agent>-<ulid>/
+├── before.md
+├── after.md
+├── diff.patch
+├── iteration-logs/round-N.md
+├── gold-replay.json
+└── approval.md
+```
+
+After `josh evolve approve`, the folder moves to `~/.josh/approvals/done/<evolve-id>/`. Rejections write a `rejection.json` and follow the same archive path.
+
 ## Cryptographic audit (Phase 6)
 
 Two layered cryptographic guarantees, both required at read time.

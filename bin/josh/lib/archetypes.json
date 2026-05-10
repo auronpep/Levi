@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "version": 1,
+  "source": "gonzaloetjo/setup-claude-md (10-archetype catalog)",
+  "archetypes": [
+    { "id": 1, "name": "single_atomic_change",   "description": "One file, one self-contained change." },
+    { "id": 2, "name": "multi_file_refactor",    "description": "Coordinated rename / extract across multiple files." },
+    { "id": 3, "name": "cross_module_breaking",  "description": "API change that requires callers to migrate." },
+    { "id": 4, "name": "data_migration",         "description": "Schema change with backfill / forward-compat path." },
+    { "id": 5, "name": "perf_regression",        "description": "Bisect / fix a perf regression." },
+    { "id": 6, "name": "security_hardening",     "description": "Patch a vulnerability or harden a surface." },
+    { "id": 7, "name": "flaky_test_diagnosis",   "description": "Investigate intermittent test failure." },
+    { "id": 8, "name": "dep_upgrade",            "description": "Major version bump of an external dep." },
+    { "id": 9, "name": "infra_change",           "description": "Build / CI / deploy / cron / scheduler edit." },
+    { "id": 10, "name": "spec_drift_repair",     "description": "Reconcile diverged spec vs. implementation." }
+  ]
+}

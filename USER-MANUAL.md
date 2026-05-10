@@ -751,6 +751,38 @@ Now requires a valid `handoff.md` in the todo folder unless `--skip-handoff` is 
 
 Each todo folder carries an append-only `events.ndjson` for the 14-event taxonomy (5 lifecycle: `start`/`heartbeat`/`done`/`failed`/`interrupted`; 9 stream: `backend_ref`/`run_started`/`text_delta`/`tool_call`/`pending_input`/`pending_input_resolved`/`plan_artifact`/`settings_changed`/`run_completed`). Phase 2A ships only the append helper (`bin/josh/lib/events-writer.js`); session-side emission is wired by future code.
 
+### 7.20 Spec-evolver meta-lane (Phase 7)
+
+Phase 7 implements spec §10: agent briefs evolve through plan-only iteration rounds with gold-set replay scoring; halt rules + approval drop + manual approve/reject. v1 in-scope agents: **A01, E00, E08**.
+
+#### CLI
+
+- `josh evolve start <agent-id> [--max-rounds 5] [--simulator <dir>] [--allow-any]`
+- `josh evolve status [<evolve-id>]`
+- `josh evolve list [--state active|pending_approval|done]`
+- `josh evolve approve <evolve-id>` — swap brief + bump manifest version
+- `josh evolve reject <evolve-id> --reason "..."` — archive with rejection.json
+- `josh lesson add <agent-id> "text"` / `josh lesson list <agent-id>`
+
+#### Halt rules
+
+- **converged**: `pass_rate ≥ 0.95` AND `<NO_NEW_GAPS_FOUND>` × 2 consecutive rounds
+- **bloating**: brief > 250 lines after pruning
+- **regression**: pass_rate dropped vs previous round (revert to previous round)
+- **max_rounds**: hard ceiling at N=8 (default 5)
+
+#### Layout
+
+- Active: `~/.josh/agents/<id>/evolve/<evolve-id>/state.json` + `round-N/{after.md, frustration.md, gaps.json}`
+- Approval ready: `~/.josh/approvals/<evolve-id>/{before.md, after.md, diff.patch, iteration-logs/, gold-replay.json, approval.md}`
+- Archived: `~/.josh/approvals/done/<evolve-id>/`
+
+Old verdicts continue to verify against the v1 `brief_hash` because Phase 6 binds it into the signed payload.
+
+#### `--simulator <dir>` mode
+
+Tests + bootstrapping use a simulator dir holding pre-baked `round-N.json` files. Each is a candidate `{round_num, after_md, no_new_gaps_found_emitted, gold_replay, ...}`. The CLI processes them sequentially through the round + halt-rule pipeline, exercising the full lifecycle without a real model invocation.
+
 ### 7.19 Cryptographic audit (Phase 6)
 
 Two layers, both required at read time. HMAC chain (we build) detects any tamper at the exact line; Ed25519 signatures (per-agent) prevent forgery even with valid HMAC.
