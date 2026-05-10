@@ -4128,6 +4128,132 @@ function cmdA2AHealth(args) {
   return 0;
 }
 
+// ─── Phase 9: dashboard + cost telemetry ─────────────────────────────────────
+
+function cmdCost(args) {
+  const sub = args[0];
+  const rest = args.slice(1);
+  if (!sub || sub === 'help' || sub === '--help' || sub === '-h') {
+    log(`Usage: josh cost <subcommand>
+
+Subcommands:
+  log --todo <id> --agent <id> --model <m> --tokens-in N --tokens-out N --wall N --usd N [--phase N]
+  summary [--month YYYY-MM] [--since ISO] [--by agent|phase|model]
+  list-months`);
+    return 0;
+  }
+  switch (sub) {
+    case 'log':         return cmdCostLog(rest);
+    case 'summary':     return cmdCostSummary(rest);
+    case 'list-months': return cmdCostListMonths();
+    default: err(`unknown cost subcommand: ${sub}`); return 1;
+  }
+}
+
+function cmdCostLog(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        todo:        { type: 'string' },
+        agent:       { type: 'string' },
+        model:       { type: 'string' },
+        'tokens-in': { type: 'string' },
+        'tokens-out':{ type: 'string' },
+        wall:        { type: 'string' },
+        usd:         { type: 'string' },
+        phase:       { type: 'string' },
+        sentinel:    { type: 'string' },
+      },
+      allowPositionals: false, strict: true,
+    });
+  } catch (e) { return errExit(e.message, 1); }
+  const { appendCost } = require('./lib/cost-ledger');
+  const v = parsed.values;
+  const p = appendCost(JOSH_ROOT, {
+    todo_id: v.todo, agent_id: v.agent, model: v.model,
+    tokens_in: v['tokens-in'] ? parseInt(v['tokens-in'], 10) : 0,
+    tokens_out: v['tokens-out'] ? parseInt(v['tokens-out'], 10) : 0,
+    wall_seconds: v.wall ? parseInt(v.wall, 10) : 0,
+    usd: v.usd ? parseFloat(v.usd) : 0,
+    phase: v.phase != null ? parseInt(v.phase, 10) : null,
+    sentinel: v.sentinel || null,
+  });
+  log(`logged → ${path.relative(JOSH_ROOT, p).replace(/\\/g, '/')}`);
+  return 0;
+}
+
+function cmdCostSummary(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: { month: { type: 'string' }, since: { type: 'string' }, by: { type: 'string' }, todo: { type: 'string' }, agent: { type: 'string' } },
+      allowPositionals: false, strict: true,
+    });
+  } catch (e) { return errExit(e.message, 1); }
+  const { summarize } = require('./lib/cost-ledger');
+  const s = summarize(JOSH_ROOT, {
+    month: parsed.values.month,
+    since: parsed.values.since,
+    todo_id: parsed.values.todo,
+    agent_id: parsed.values.agent,
+  });
+  log(`runs:        ${s.run_count}`);
+  log(`tokens_in:   ${s.total.tokens_in}`);
+  log(`tokens_out:  ${s.total.tokens_out}`);
+  log(`wall_sec:    ${s.total.wall_seconds}`);
+  log(`usd:         ${s.total.usd.toFixed(4)}`);
+  const breakdownKey = parsed.values.by;
+  if (breakdownKey === 'agent') {
+    log('');
+    log('by agent:');
+    for (const [k, v] of Object.entries(s.by_agent)) log(`  ${k.padEnd(12)} runs=${v.count} usd=${v.usd.toFixed(4)}`);
+  } else if (breakdownKey === 'model') {
+    log('');
+    log('by model:');
+    for (const [k, v] of Object.entries(s.by_model)) log(`  ${k.padEnd(12)} runs=${v.count} usd=${v.usd.toFixed(4)}`);
+  } else if (breakdownKey === 'phase') {
+    log('');
+    log('by phase:');
+    for (const [k, v] of Object.entries(s.by_phase)) log(`  ${k.padEnd(12)} runs=${v.count} usd=${v.usd.toFixed(4)}`);
+  }
+  return 0;
+}
+
+function cmdCostListMonths() {
+  const { listMonths } = require('./lib/cost-ledger');
+  const months = listMonths(JOSH_ROOT);
+  if (months.length === 0) { log('(no cost ledger files)'); return 0; }
+  for (const m of months) log(`  ${m}`);
+  return 0;
+}
+
+function cmdDashboard(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        project:          { type: 'string' },
+        since:            { type: 'string' },
+        'drift-window':   { type: 'string' },
+        'drift-threshold':{ type: 'string' },
+      },
+      allowPositionals: false, strict: true,
+    });
+  } catch (e) { return errExit(e.message, 1); }
+  const { renderDashboard } = require('./lib/dashboard');
+  log(renderDashboard(JOSH_ROOT, {
+    project: parsed.values.project,
+    since: parsed.values.since,
+    driftWindow: parsed.values['drift-window'] ? parseInt(parsed.values['drift-window'], 10) : undefined,
+    driftThreshold: parsed.values['drift-threshold'] ? parseInt(parsed.values['drift-threshold'], 10) : undefined,
+  }));
+  return 0;
+}
+
 // Augment cmdVerdict with `verify` subcommand.
 function cmdVerdictVerify(args) {
   const todoId = args[0];
@@ -4286,6 +4412,8 @@ const COMMANDS = {
   lesson: cmdLesson,
   tool: cmdTool,
   a2a: cmdA2A,
+  cost: cmdCost,
+  dashboard: cmdDashboard,
   lock: cmdLock,
   help: cmdHelp,
   '--help': cmdHelp,
