@@ -32,6 +32,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { parseArgs } = require('util');
+const ew = require('./lib/events-writer');
 
 // ─── Paths ───────────────────────────────────────────────────────────────────
 
@@ -394,6 +395,18 @@ function transitionTodo({ src, dst, srcStates, idOrSuffix, actor, eventName, eve
   writeJsonAtomic(metaPath, todo);
   // Sync the one-line state file.
   try { fs.writeFileSync(path.join(toDir, 'state'), dst + '\n', 'utf8'); } catch (e) { /* non-fatal */ }
+
+  // Lifecycle event: every transition emits a "start" event in the new state's folder.
+  // Best-effort — never fail the transition over a missing event line.
+  try {
+    ew.appendEvent(JOSH_ROOT, dst, located.id, {
+      kind: 'start',
+      state: dst,
+      from: located.state,
+      actor,
+      event: eventName,
+    });
+  } catch (e) { /* non-fatal */ }
 
   if (audit) appendAudit({ actor, action: audit.action, id: located.id, details: audit.details || {} });
 
@@ -1468,6 +1481,15 @@ function cmdComplete(args) {
     audit: { action: 'todo.completed', details: parsed.values.note ? { note: parsed.values.note } : {} }
   });
   if (r.error) return errExit(r.error, r.code);
+  // Lifecycle event: terminal "done" with success=true.
+  try {
+    ew.appendEvent(JOSH_ROOT, 'done', r.id, {
+      kind: 'done',
+      success: true,
+      actor,
+      ...(parsed.values.note ? { note: parsed.values.note } : {}),
+    });
+  } catch (e) { /* non-fatal */ }
   log(r.id);
   return 0;
 }
@@ -1508,6 +1530,14 @@ function cmdFail(args) {
     audit: { action: 'todo.failed', details: { reason } }
   });
   if (r.error) return errExit(r.error, r.code);
+  // Lifecycle event: terminal "failed" with reason.
+  try {
+    ew.appendEvent(JOSH_ROOT, 'failed', r.id, {
+      kind: 'failed',
+      reason,
+      actor,
+    });
+  } catch (e) { /* non-fatal */ }
   log(r.id);
   return 0;
 }

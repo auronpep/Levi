@@ -253,3 +253,59 @@ test('cli: complete --skip-handoff bypasses validation', () => {
   assert.equal(fs.existsSync(path.join(root, 'todo', 'done', id, 'meta.json')), true);
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+// ─── Fix I1: events-writer wired into lifecycle ─────────────────────────────
+
+function readEvents(folder) {
+  const evPath = path.join(folder, 'events.ndjson');
+  if (!fs.existsSync(evPath)) return [];
+  return fs.readFileSync(evPath, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+}
+
+test('lifecycle events: claim writes a start event into in_progress folder', () => {
+  const root = setupRoot();
+  const out = runCli('push todo "events-claim"', { JOSH_ROOT: root });
+  const id = out.trim().split('\n').filter(Boolean).pop().trim();
+  runCli('tick', { JOSH_ROOT: root });
+  runCli(`claim ${id} --as worker`, { JOSH_ROOT: root });
+
+  const ipDir = path.join(root, 'todo', 'in_progress', id);
+  const events = readEvents(ipDir);
+  assert.ok(events.length >= 1, `expected events.ndjson to have at least one line, got ${events.length}`);
+  const starts = events.filter(e => e.kind === 'start');
+  assert.ok(starts.length >= 1, 'expected at least one "start" event after claim');
+  assert.equal(starts[0].state, 'in_progress', 'start event should record the new state');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('lifecycle events: complete writes a done event into done folder', () => {
+  const root = setupRoot();
+  const out = runCli('push todo "events-done"', { JOSH_ROOT: root });
+  const id = out.trim().split('\n').filter(Boolean).pop().trim();
+  runCli('tick', { JOSH_ROOT: root });
+  runCli(`claim ${id} --as worker`, { JOSH_ROOT: root });
+  runCli(`complete ${id} --as worker --skip-handoff`, { JOSH_ROOT: root });
+
+  const doneDir = path.join(root, 'todo', 'done', id);
+  const events = readEvents(doneDir);
+  const done = events.filter(e => e.kind === 'done');
+  assert.ok(done.length >= 1, `expected at least one "done" event in events.ndjson, got: ${JSON.stringify(events)}`);
+  assert.equal(done[0].success, true, 'done event should record success: true');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('lifecycle events: fail writes a failed event with reason', () => {
+  const root = setupRoot();
+  const out = runCli('push todo "events-fail"', { JOSH_ROOT: root });
+  const id = out.trim().split('\n').filter(Boolean).pop().trim();
+  runCli('tick', { JOSH_ROOT: root });
+  runCli(`claim ${id} --as worker`, { JOSH_ROOT: root });
+  runCli(`fail ${id} --as worker --reason "broken"`, { JOSH_ROOT: root });
+
+  const failedDir = path.join(root, 'todo', 'failed', id);
+  const events = readEvents(failedDir);
+  const failed = events.filter(e => e.kind === 'failed');
+  assert.ok(failed.length >= 1, `expected at least one "failed" event, got: ${JSON.stringify(events)}`);
+  assert.equal(failed[0].reason, 'broken', 'failed event should carry the reason');
+  fs.rmSync(root, { recursive: true, force: true });
+});
