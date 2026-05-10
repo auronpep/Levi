@@ -2826,6 +2826,179 @@ function cmdProjectSync(args) {
   }
 }
 
+function cmdPlan(args) {
+  const sub = args[0];
+  const rest = args.slice(1);
+  if (!sub || sub === 'help' || sub === '--help' || sub === '-h') {
+    log(`Usage: josh plan <subcommand>
+
+Subcommands:
+  submit <todo-id> --plan <path>          claimed → awaiting_approval (validates 8-section plan)
+  approve <todo-id>                       awaiting_approval → approved (writes approval signal)
+  reject <todo-id> --reason "..."         awaiting_approval → rejected`);
+    return 0;
+  }
+  switch (sub) {
+    case 'submit':  return cmdPlanSubmit(rest);
+    case 'approve': return cmdPlanApprove(rest);
+    case 'reject':  return cmdPlanReject(rest);
+    default:
+      err(`unknown plan subcommand: ${sub}`);
+      return 1;
+  }
+}
+
+function cmdPlanSubmit(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        plan:  { type: 'string' },
+        as:    { type: 'string' },
+        actor: { type: 'string' },
+      },
+      allowPositionals: true,
+      strict: true,
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const idArg = parsed.positionals[0];
+  if (!idArg) return errExit('plan submit requires <todo-id>', 1);
+  const planPath = parsed.values.plan;
+  if (!planPath) return errExit('plan submit requires --plan <path>', 1);
+  if (!fs.existsSync(planPath)) return errExit(`plan file not found: ${planPath}`, 2);
+
+  const actor = resolveActor(parsed.values);
+  const planText = fs.readFileSync(planPath, 'utf8');
+  const { validatePlan } = require('./lib/plan-validator');
+  const v = validatePlan(planText);
+  if (!v.ok) {
+    err('plan validation failed:');
+    for (const e of v.errors) err(`  - ${e}`);
+    return 1;
+  }
+
+  // Transition claimed → awaiting_approval (single move; planning state is logged in history).
+  const r = transitionTodo({
+    srcStates: ['claimed'],
+    dst: 'awaiting_approval',
+    idOrSuffix: idArg,
+    actor,
+    eventName: 'plan_submitted',
+    eventDetails: { plan_id: v.frontmatter.id, plan_status: v.frontmatter.status },
+    update: (t, now) => {
+      t.history.push({ at: now, actor, event: 'planning', details: { plan_id: v.frontmatter.id } });
+      t.plan_id = v.frontmatter.id;
+    },
+    audit: { action: 'todo.plan_submitted', details: { plan_id: v.frontmatter.id } },
+  });
+  if (r.error) return errExit(r.error, r.code);
+
+  // After the move, the folder is at awaiting_approval/<id>/.
+  const folder = path.join(JOSH_ROOT, 'todo', 'awaiting_approval', r.id);
+  // Copy plan.md into the folder.
+  fs.writeFileSync(path.join(folder, 'plan.md'), planText, 'utf8');
+  // Write plan-review.json.
+  const planReview = {
+    schema_version: 1,
+    plan_id: v.frontmatter.id,
+    submitted_at: new Date().toISOString(),
+    submitted_by: actor,
+    ready_for_implementation: false,
+    blocking_decisions: [],
+    section_count: v.sections.length,
+  };
+  writeJsonAtomic(path.join(folder, 'plan-review.json'), planReview);
+  // Write approval signal file (atomic-mv pattern).
+  fs.writeFileSync(path.join(folder, 'approval'), 'pending\n', 'utf8');
+
+  log(r.id);
+  return 0;
+}
+
+function cmdPlanApprove(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        as:    { type: 'string' },
+        actor: { type: 'string' },
+        note:  { type: 'string' },
+      },
+      allowPositionals: true,
+      strict: true,
+    });
+  } catch (e) { return errExit(e.message, 1); }
+  const idArg = parsed.positionals[0];
+  if (!idArg) return errExit('plan approve requires <todo-id>', 1);
+  const actor = resolveActor(parsed.values);
+
+  const r = transitionTodo({
+    srcStates: ['awaiting_approval'],
+    dst: 'approved',
+    idOrSuffix: idArg,
+    actor,
+    eventName: 'plan_approved',
+    eventDetails: parsed.values.note ? { note: parsed.values.note } : {},
+    update: (t, now) => {
+      t.plan_approved_at = now;
+      t.plan_approved_by = actor;
+    },
+    audit: { action: 'todo.plan_approved', details: parsed.values.note ? { note: parsed.values.note } : {} },
+  });
+  if (r.error) return errExit(r.error, r.code);
+
+  // Update the approval signal file in the new location.
+  const folder = path.join(JOSH_ROOT, 'todo', 'approved', r.id);
+  try { fs.writeFileSync(path.join(folder, 'approval'), 'approved\n', 'utf8'); } catch (e) { /* non-fatal */ }
+  log(r.id);
+  return 0;
+}
+
+function cmdPlanReject(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        as:     { type: 'string' },
+        actor:  { type: 'string' },
+        reason: { type: 'string' },
+      },
+      allowPositionals: true,
+      strict: true,
+    });
+  } catch (e) { return errExit(e.message, 1); }
+  const idArg = parsed.positionals[0];
+  if (!idArg) return errExit('plan reject requires <todo-id>', 1);
+  const reason = parsed.values.reason;
+  if (!reason) return errExit('plan reject requires --reason "<text>"', 1);
+  const actor = resolveActor(parsed.values);
+
+  const r = transitionTodo({
+    srcStates: ['awaiting_approval'],
+    dst: 'rejected',
+    idOrSuffix: idArg,
+    actor,
+    eventName: 'plan_rejected',
+    eventDetails: { reason },
+    update: (t, now) => {
+      t.plan_rejected_at = now;
+      t.plan_rejected_by = actor;
+      t.plan_rejection_reason = reason;
+    },
+    audit: { action: 'todo.plan_rejected', details: { reason } },
+  });
+  if (r.error) return errExit(r.error, r.code);
+
+  const folder = path.join(JOSH_ROOT, 'todo', 'rejected', r.id);
+  try { fs.writeFileSync(path.join(folder, 'approval'), 'rejected\n', 'utf8'); } catch (e) { /* non-fatal */ }
+  log(r.id);
+  return 0;
+}
+
 function cmdHelp() {
   log(`josh — CLI for the ~/.josh/ shared agent runtime`);
   log(``);
@@ -2944,6 +3117,7 @@ const COMMANDS = {
   review: cmdReview,
   validate: cmdValidate,
   project: cmdProject,
+  plan: cmdPlan,
   lock: cmdLock,
   help: cmdHelp,
   '--help': cmdHelp,

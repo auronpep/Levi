@@ -109,3 +109,71 @@ test('cli: claim --agent rejects when primary_role does not match', () => {
 
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+test('cli: plan submit validates 8-section plan and transitions to awaiting_approval', () => {
+  const root = setupRoot();
+  // Seed agent A01
+  const briefSource = path.join(root, 'AGENT_01.md');
+  fs.writeFileSync(briefSource, '# Agent A01\n');
+  fs.mkdirSync(path.join(root, 'agents', 'A01'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'agents', 'A01', 'manifest.json'), JSON.stringify({
+    schema: 1, id: 'A01', source_path: briefSource,
+  }));
+  // Push and triage and claim
+  const out = runCli('push todo "plan-test"', { JOSH_ROOT: root });
+  const id = out.trim().split('\n').filter(Boolean).pop().trim();
+  runCli('tick', { JOSH_ROOT: root });
+  const metaPath = path.join(root, 'todo', 'triaged', id, 'meta.json');
+  const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+  meta.primary_role = 'A01';
+  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+  runCli(`claim ${id} --agent A01 --as A01`, { JOSH_ROOT: root });
+
+  // Submit a valid plan
+  const planSource = path.resolve(__dirname, 'fixtures/sample-plan.md');
+  runCli(`plan submit ${id} --plan "${planSource}" --as A01`, { JOSH_ROOT: root });
+
+  // Folder should now be in awaiting_approval/
+  const aaDir = path.join(root, 'todo', 'awaiting_approval', id);
+  assert.equal(fs.existsSync(aaDir), true, 'expected awaiting_approval folder');
+  assert.equal(fs.existsSync(path.join(aaDir, 'plan.md')), true, 'plan.md should be copied into folder');
+  assert.equal(fs.existsSync(path.join(aaDir, 'plan-review.json')), true, 'plan-review.json should exist');
+  assert.equal(fs.existsSync(path.join(aaDir, 'approval')), true, 'approval signal file should exist');
+  assert.equal(fs.readFileSync(path.join(aaDir, 'approval'), 'utf8').trim(), 'pending');
+
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('cli: plan submit rejects an invalid plan', () => {
+  const root = setupRoot();
+  const briefSource = path.join(root, 'AGENT_03.md');
+  fs.writeFileSync(briefSource, '# Agent A03\n');
+  fs.mkdirSync(path.join(root, 'agents', 'A03'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'agents', 'A03', 'manifest.json'), JSON.stringify({
+    schema: 1, id: 'A03', source_path: briefSource,
+  }));
+  const out = runCli('push todo "plan-bad"', { JOSH_ROOT: root });
+  const id = out.trim().split('\n').filter(Boolean).pop().trim();
+  runCli('tick', { JOSH_ROOT: root });
+  const metaPath = path.join(root, 'todo', 'triaged', id, 'meta.json');
+  const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+  meta.primary_role = 'A03';
+  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+  runCli(`claim ${id} --agent A03 --as A03`, { JOSH_ROOT: root });
+
+  // Write an invalid plan (no frontmatter)
+  const badPlanPath = path.join(root, 'bad-plan.md');
+  fs.writeFileSync(badPlanPath, '## Fast-Path\n\nincomplete\n');
+  let err = null;
+  try {
+    runCli(`plan submit ${id} --plan "${badPlanPath}" --as A03`, { JOSH_ROOT: root });
+  } catch (e) {
+    err = e;
+  }
+  assert.ok(err, 'expected plan submit to fail on invalid plan');
+  assert.match(err.stderr.toString(), /frontmatter|missing required section/i);
+  // Todo must remain in claimed
+  assert.equal(fs.existsSync(path.join(root, 'todo', 'claimed', id)), true);
+
+  fs.rmSync(root, { recursive: true, force: true });
+});
