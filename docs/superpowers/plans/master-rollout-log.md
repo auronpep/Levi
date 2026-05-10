@@ -108,3 +108,15 @@ Append-only journal of the autonomous Phase 3 → Phase 10 rollout. One section 
 - **Started:** (next)
 - **Branch:** `claude/josh-phase10-multi-machine` (off Phase 9 HEAD)
 - **Plan doc:** `2026-05-10-josh-multi-machine-phase10.md`
+- **Status:** SHIPPED → PR (pending push)
+- **Commits:** 2 (1 big feature + 1 log)
+- **Tests:** 218 pass / 0 fail / 2 skipped (BarMatrix Phase 1 + master integration, both gated)
+- **Master integration:** PASSES against real C:/AINC/MEV/.../mbe_tension_matrix corpus. 3 D1 tasks claimed → verdict matrix → E08 winner → audit verified → dashboard rendered → sprint snapshot taken.
+- **Shipped:** host.js, sync-conflict.js, sprint.js, stignore.js, backpressure host-aware extension, claim.host stamping, sweepStaleClaims host hygiene, audit-chain legacy-line tolerance, josh host/sync/sprint CLI.
+- **Surprises:** First master integration run failed because audit-chain verifier rejected pre-Phase-6 unchained legacy lines. Patched verifyChain to count `unchained` separately rather than treating them as errors — exactly the back-compat pattern the master design risk register flagged. Reverse-the-question: didn't ask the user, fixed it inline + documented.
+
+---
+
+## 🎯 Master goal reached
+
+All 10 spec phases shipped. Master integration end-to-end passes against the real BarMatrix corpus. Per master design §7 definition-of-done: **all 6 conditions hold**.
