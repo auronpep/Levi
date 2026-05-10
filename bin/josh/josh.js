@@ -3437,13 +3437,15 @@ function cmdVerdict(args) {
 Subcommands:
   submit <todo-id> --envelope <path>    Validate + write a verdict envelope
   list <todo-id>                        List per-agent verdicts on a todo
-  show <todo-id> [<agent-id>|winner]    Print a verdict envelope (or winner.json)`);
+  show <todo-id> [<agent-id>|winner]    Print a verdict envelope (or winner.json)
+  verify <todo-id> [<agent-id>]         Verify Ed25519 signatures (Phase 6)`);
     return 0;
   }
   switch (sub) {
     case 'submit': return cmdVerdictSubmit(rest);
     case 'list':   return cmdVerdictList(rest);
     case 'show':   return cmdVerdictShow(rest);
+    case 'verify': return cmdVerdictVerify(rest);
     default:
       err(`unknown verdict subcommand: ${sub}`);
       return 1;
@@ -3609,6 +3611,145 @@ function cmdMatrixPending() {
   return 0;
 }
 
+// ─── Phase 6: cryptographic audit ────────────────────────────────────────────
+
+function cmdAgent(args) {
+  const sub = args[0];
+  const rest = args.slice(1);
+  if (!sub || sub === 'help' || sub === '--help' || sub === '-h') {
+    log(`Usage: josh agent <subcommand>
+
+Subcommands:
+  mint <agent-id> [--rotate]      Mint Ed25519 keypair + DID; patch manifest
+  show <agent-id>                 Show DID + pubkey path + brief_hash`);
+    return 0;
+  }
+  switch (sub) {
+    case 'mint': return cmdAgentMint(rest);
+    case 'show': return cmdAgentShow(rest);
+    default: err(`unknown agent subcommand: ${sub}`); return 1;
+  }
+}
+
+function cmdAgentMint(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({ args, options: { rotate: { type: 'boolean' } }, allowPositionals: true, strict: true });
+  } catch (e) { return errExit(e.message, 1); }
+  const id = parsed.positionals[0];
+  if (!id) return errExit('agent mint requires <agent-id>', 1);
+  const { mintAgentIdentity } = require('./lib/identity');
+  try {
+    const r = mintAgentIdentity(JOSH_ROOT, id, { rotate: !!parsed.values.rotate });
+    log(`agent ${id} minted`);
+    log(`  did:        ${r.did}`);
+    log(`  pubkey:     agents/${id}/pubkey.jwk`);
+    log(`  identity:   agents/${id}/identity.key (mode 0600)`);
+    log(`  version:    ${r.version}`);
+    appendAudit({ actor: defaultActor(), action: 'agent.minted', id, details: { did: r.did, version: r.version } });
+    return 0;
+  } catch (e) { return errExit(e.message, 4); }
+}
+
+function cmdAgentShow(args) {
+  const id = args[0];
+  if (!id) return errExit('agent show requires <agent-id>', 1);
+  const { agentBriefHash } = require('./lib/identity');
+  const manifestPath = path.join(JOSH_ROOT, 'agents', id, 'manifest.json');
+  if (!fs.existsSync(manifestPath)) return errExit(`agent ${id} not found`, 2);
+  const m = readJson(manifestPath);
+  log(`agent ${id}`);
+  log(`  did:         ${m.did || '(not minted)'}`);
+  log(`  pubkey_path: ${m.pubkey_path || '(none)'}`);
+  log(`  source:      ${m.source_path}`);
+  try { log(`  brief_hash:  ${agentBriefHash(JOSH_ROOT, id)}`); } catch (e) {}
+  log(`  version:     ${m.version || 1}`);
+  return 0;
+}
+
+function cmdAudit(args) {
+  const sub = args[0];
+  const rest = args.slice(1);
+  if (!sub || sub === 'help' || sub === '--help' || sub === '-h') {
+    log(`Usage: josh audit <subcommand>
+
+Subcommands:
+  verify <date>                   Verify HMAC chain for a YYYY-MM-DD audit file
+  rotate-key [--id YYYY-MM]       Mint a new audit key + emit key_rotated event
+  list-keys                       List audit keys present in ~/.josh/keys/`);
+    return 0;
+  }
+  switch (sub) {
+    case 'verify':       return cmdAuditVerify(rest);
+    case 'rotate-key':   return cmdAuditRotateKey(rest);
+    case 'list-keys':    return cmdAuditListKeys(rest);
+    default: err(`unknown audit subcommand: ${sub}`); return 1;
+  }
+}
+
+function cmdAuditVerify(args) {
+  const date = args[0];
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return errExit('audit verify requires <YYYY-MM-DD>', 1);
+  const { verifyChain } = require('./lib/audit-chain');
+  const r = verifyChain(JOSH_ROOT, date);
+  if (r.valid) {
+    log(`audit ${date}: VALID  (${r.chain_length} events)`);
+    return 0;
+  }
+  err(`audit ${date}: INVALID  (${r.chain_length} events, ${r.errors.length} errors)`);
+  for (const e of r.errors.slice(0, 20)) {
+    err(`  line ${e.position}: ${e.message}`);
+  }
+  if (r.errors.length > 20) err(`  ... ${r.errors.length - 20} more`);
+  return 1;
+}
+
+function cmdAuditRotateKey(args) {
+  let parsed;
+  try { parsed = parseArgs({ args, options: { id: { type: 'string' } }, allowPositionals: false, strict: true }); }
+  catch (e) { return errExit(e.message, 1); }
+  const { rotateAuditKey } = require('./lib/audit-key');
+  const { appendChainedAudit } = require('./lib/audit-chain');
+  try {
+    const r = rotateAuditKey(JOSH_ROOT, { newId: parsed.values.id });
+    // Emit a key_rotated marker as the first event under the new key's umbrella for today.
+    appendChainedAudit(JOSH_ROOT, {
+      event: 'audit.key_rotated', actor: defaultActor(),
+      details: { from: r.previous_key_id, to: r.current_key_id },
+    }, { key_id: r.current_key_id });
+    log(`audit key rotated: ${r.previous_key_id || '(genesis)'} → ${r.current_key_id}`);
+    return 0;
+  } catch (e) { return errExit(e.message, 4); }
+}
+
+function cmdAuditListKeys() {
+  const { listAuditKeys } = require('./lib/audit-key');
+  const ids = listAuditKeys(JOSH_ROOT);
+  if (ids.length === 0) { log('(no audit keys)'); return 0; }
+  for (const id of ids) log(`  audit-${id}.key`);
+  return 0;
+}
+
+// Augment cmdVerdict with `verify` subcommand.
+function cmdVerdictVerify(args) {
+  const todoId = args[0];
+  const agentId = args[1] || null;
+  if (!todoId) return errExit('verdict verify requires <todo-id> [<agent-id>]', 1);
+  const { listVerdicts, readEnvelope, verifyEnvelope } = require('./lib/verdict-envelope');
+  const targets = agentId ? [agentId] : listVerdicts(JOSH_ROOT, todoId);
+  if (targets.length === 0) { err('no envelopes found'); return 2; }
+  let allOk = true;
+  for (const a of targets) {
+    let env;
+    try { env = readEnvelope(JOSH_ROOT, todoId, a); }
+    catch (e) { log(`  ${a}: read failed: ${e.message}`); allOk = false; continue; }
+    const r = verifyEnvelope(JOSH_ROOT, env);
+    log(`  ${a}: ${r.valid ? 'VALID' : 'INVALID — ' + r.reason}`);
+    if (!r.valid) allOk = false;
+  }
+  return allOk ? 0 : 1;
+}
+
 function cmdHelp() {
   log(`josh — CLI for the ~/.josh/ shared agent runtime`);
   log(``);
@@ -3741,6 +3882,8 @@ const COMMANDS = {
   plan: cmdPlan,
   verdict: cmdVerdict,
   matrix: cmdMatrix,
+  agent: cmdAgent,
+  audit: cmdAudit,
   lock: cmdLock,
   help: cmdHelp,
   '--help': cmdHelp,

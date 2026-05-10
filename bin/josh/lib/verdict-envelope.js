@@ -78,11 +78,62 @@ function writeEnvelope(joshRoot, todoId, envelope) {
     err.code = 'EINVAL';
     throw err;
   }
-  const p = envelopePath(joshRoot, todoId, envelope.agent_id);
+  // Phase 6: if the agent has identity.key, sign the envelope payload before write.
+  // This is opt-in — pre-Phase-6 envelopes (sig:null) still write fine.
+  let outEnvelope = envelope;
+  try {
+    const fsLocal = require('node:fs');
+    const pathLocal = require('node:path');
+    const idKey = pathLocal.join(joshRoot, 'agents', envelope.agent_id, 'identity.key');
+    if (fsLocal.existsSync(idKey)) {
+      const { loadAgentKeys, agentBriefHash } = require('./identity');
+      const { encodeJws } = require('./jws');
+      const keys = loadAgentKeys(joshRoot, envelope.agent_id);
+      // Build the signing payload — bind to brief_hash + iat + nbf + aud (replay defense).
+      const briefHash = (() => { try { return agentBriefHash(joshRoot, envelope.agent_id); } catch (e) { return envelope.brief_hash; } })();
+      const sigPayload = {
+        aud: 'josh:audit',
+        iss: keys.did,
+        sub: envelope.todo_id,
+        iat: Math.floor(Date.now() / 1000),
+        nbf: Math.floor(Date.now() / 1000) - 60,
+        brief_hash: briefHash,
+        verdict_id: envelope.id,
+        agent_id: envelope.agent_id,
+        status: envelope.payload && envelope.payload.status,
+        confidence: envelope.confidence,
+      };
+      const jws = encodeJws({ payloadObj: sigPayload, privateKey: keys.privateKey, did: keys.did });
+      outEnvelope = { ...envelope, brief_hash: briefHash, sig: jws };
+    }
+  } catch (e) { /* signing best-effort; pre-Phase-6 path still works */ }
+  const p = envelopePath(joshRoot, todoId, outEnvelope.agent_id);
   const tmp = p + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(envelope, null, 2) + '\n');
+  fs.writeFileSync(tmp, JSON.stringify(outEnvelope, null, 2) + '\n');
   fs.renameSync(tmp, p);
   return p;
+}
+
+function verifyEnvelope(joshRoot, envelope) {
+  if (!envelope || !envelope.sig) {
+    return { valid: false, reason: 'envelope has no sig (pre-Phase-6 envelope)' };
+  }
+  let agentDir;
+  try {
+    const { loadAgentKeys } = require('./identity');
+    const { verifyJws } = require('./jws');
+    const keys = loadAgentKeys(joshRoot, envelope.agent_id);
+    const v = verifyJws(envelope.sig, keys.publicKey);
+    if (!v.valid) return { valid: false, reason: v.reason || 'sig verification failed' };
+    // Check brief_hash binding.
+    const claimed = v.parts.payload.brief_hash;
+    if (claimed && envelope.brief_hash && claimed !== envelope.brief_hash) {
+      return { valid: false, reason: 'brief_hash in sig does not match envelope.brief_hash' };
+    }
+    return { valid: true, parts: v.parts };
+  } catch (e) {
+    return { valid: false, reason: e.message };
+  }
 }
 
 function readEnvelope(joshRoot, todoId, agentId) {
@@ -105,6 +156,7 @@ module.exports = {
   validateEnvelope,
   writeEnvelope,
   readEnvelope,
+  verifyEnvelope,
   listVerdicts,
   findTodoFolder,
 };

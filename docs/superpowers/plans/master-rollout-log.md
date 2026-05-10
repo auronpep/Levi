@@ -53,3 +53,17 @@ Append-only journal of the autonomous Phase 3 → Phase 10 rollout. One section 
 - **Started:** (next)
 - **Branch:** `claude/josh-phase6-crypto` (off Phase 5 HEAD)
 - **Plan doc:** `2026-05-10-josh-crypto-phase6.md`
+- **Status:** SHIPPED → PR (pending push)
+- **Commits:** 8 (6 lib + 1 wiring/docs/smoke + 1 log)
+- **Tests:** 195 pass / 0 fail / 1 skipped
+- **Shipped:** canonical-json, identity, jws, audit-key, audit-chain, delegation; Phase 4 envelope writer auto-signs; CLI: agent mint/show, audit verify/rotate-key/list-keys, verdict verify; crypto-smoke covering tamper, rotation, forgery, delegation.
+- **Deferred to Phase 6.5:** OS-keychain wrap (DPAPI on Windows). Key files at 0o600 are the v1 baseline.
+- **Surprises:** 1) Initial smoke test used `replace(/"T2"/, ...)` to tamper a line, but `"T24"` doesn't contain `"T2"` — fixed by tampering an `"i":N` numeric field instead. 2) `verifyJws` initially threw on malformed JWS; refactored to return `{valid:false, reason}` for stable verifier semantics.
+
+---
+
+## Phase 7 — Spec-evolver meta-lane
+
+- **Started:** (next)
+- **Branch:** `claude/josh-phase7-spec-evolver` (off Phase 6 HEAD)
+- **Plan doc:** `2026-05-10-josh-spec-evolver-phase7.md`
