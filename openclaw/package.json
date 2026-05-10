@@ -1,9 +1,14 @@
 {
   "name": "@levi/tool-knowledge",
   "version": "0.1.0",
-  "description": "Levi tool-knowledge plugin: skills/tools/* distributed to OpenClaw, plus bootstrap-time tool-trigger guidance.",
+  "description": "Levi tool-knowledge: per-tool skills + bootstrap-time tool-trigger guidance hook.",
   "type": "module",
   "openclaw": {
-    "extensions": []
+    "hooks": [
+      "./hooks/tool-trigger-bootstrap"
+    ],
+    "skills": [
+      "./skills"
+    ]
   }
 }
