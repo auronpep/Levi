@@ -2,7 +2,8 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { parseDispatchBlock } = require('./markdown-parser');
+const crypto = require('node:crypto');
+const { parseDispatchBlock, parseAgentHeading } = require('./markdown-parser');
 
 function parseCharter(readmePath) {
   const text = fs.readFileSync(readmePath, 'utf8');
@@ -62,4 +63,26 @@ function parseTask(taskPath) {
   };
 }
 
-module.exports = { parseCharter, parseTask };
+function parseAgent(agentPath) {
+  const text = fs.readFileSync(agentPath, 'utf8');
+  const heading = parseAgentHeading(text);
+  if (!heading) {
+    throw new Error(`No agent heading found in ${agentPath}`);
+  }
+  const source_path_hash = crypto.createHash('sha256').update(text).digest('hex');
+
+  const missionMatch = text.match(/##\s+Mission\s*\n+([^\n][^\n]*(?:\n[^\n][^\n]*)*?)(?:\n\n|\n##)/);
+  const mission_summary = missionMatch ? missionMatch[1].trim() : null;
+
+  return {
+    id: heading.id,
+    title: heading.title,
+    role_group: heading.role_group,
+    status: heading.status,
+    mission_summary,
+    source_path: path.resolve(agentPath),
+    source_path_hash,
+  };
+}
+
+module.exports = { parseCharter, parseTask, parseAgent };

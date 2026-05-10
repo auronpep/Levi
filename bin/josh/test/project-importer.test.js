@@ -40,3 +40,22 @@ test('parseTask: D1-003 has D1-002 as upstream', () => {
   assert.deepEqual(result.depends_on_display_ids, ['D1-002']);
   assert.deepEqual(result.blocks_display_ids, ['D1-004']);
 });
+
+const { parseAgent } = require('../lib/project-importer');
+const FIXTURE_AGENT_DIR = path.join(__dirname, 'fixtures/corpus/agent_orchestration/agents');
+
+test('parseAgent: A01 extracts id, title, role_group, source_path, source_path_hash', () => {
+  const result = parseAgent(path.join(FIXTURE_AGENT_DIR, 'AGENT_01_COMMAND_CENTER.md'));
+  assert.equal(result.id, 'A01');
+  assert.equal(result.title, 'Command Center And Integration');
+  assert.equal(result.role_group, 'command_center_and_integration');
+  assert.equal(result.status, 'READY');
+  assert.equal(result.source_path, path.resolve(path.join(FIXTURE_AGENT_DIR, 'AGENT_01_COMMAND_CENTER.md')));
+  assert.match(result.source_path_hash, /^[a-f0-9]{64}$/);
+});
+
+test('parseAgent: A03 includes mission and gates', () => {
+  const result = parseAgent(path.join(FIXTURE_AGENT_DIR, 'AGENT_03_CLAIMS_SOURCE_SAFETY.md'));
+  assert.equal(result.id, 'A03');
+  assert.match(result.mission_summary, /unsupported claims/);
+});
