@@ -114,7 +114,11 @@ josh project sync   [--project <id>] [--dry-run]   # refresh entities from sourc
 `josh project import` creates:
 - `~/.josh/projects/<ulid>/charter.json` — the project charter (one per import)
 - `~/.josh/agents/<id>/manifest.json` — one per agent (A01..A10, E00..E08)
-- `~/.josh/todo/triaged/<ulid>.json` — one per dispatch task
+- `~/.josh/todo/triaged/<ulid>/` — one folder per dispatch task, containing
+  `meta.json` (the task record), `state` (one-line state mirror), and
+  per-todo siblings written as the lifecycle progresses (`events.ndjson`,
+  `runtime.json`, `plan.md`, `plan-review.json`, `approval`, `handoff.md`).
+  See "Agent dispatch (Phase 2A)" below for the full sibling layout.
 
 The Markdown source is **not copied**. `manifest.json` and the todo files reference source paths and store SHA-256 hashes so `josh project sync` can detect changes.
 
