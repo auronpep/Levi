@@ -99,9 +99,83 @@ josh review <review-id> --verdict request_changes \
   --as "codex:reviewer-session"
 ```
 
+## Project import
+
+Reflect a Markdown corpus (project + agents + tasks) into `~/.josh/`:
+
+```
+josh project import <corpus-path>          # one-shot import
+josh project status [--project <id>]       # render the daily-review template
+josh project sync   [--project <id>] [--dry-run]   # refresh entities from source
+```
+
+### Layout
+
+`josh project import` creates:
+- `~/.josh/projects/<ulid>/charter.json` — the project charter (one per import)
+- `~/.josh/agents/<id>/manifest.json` — one per agent (A01..A10, E00..E08)
+- `~/.josh/todo/triaged/<ulid>/` — one folder per dispatch task, containing
+  `meta.json` (the task record), `state` (one-line state mirror), and
+  per-todo siblings written as the lifecycle progresses (`events.ndjson`,
+  `runtime.json`, `plan.md`, `plan-review.json`, `approval`, `handoff.md`).
+  See "Agent dispatch (Phase 2A)" below for the full sibling layout.
+
+The Markdown source is **not copied**. `manifest.json` and the todo files reference source paths and store SHA-256 hashes so `josh project sync` can detect changes.
+
+### Source-of-truth conflict order
+
+When a task or agent reference points to a path that no longer exists, `josh project sync` reports it as `missing` rather than auto-deleting. Removal is deliberate; no orphan cleanup unless explicitly requested.
+
 ## Atomic state transitions
 
 Each mutate op uses `fs.renameSync` between state directories as the lock primitive. The rename **is** the lock acquisition — only one agent succeeds, the other gets `ENOENT` and exits cleanly with code 3 (lock-conflict). Read-modify-write happens AFTER the rename, when the agent exclusively owns the file at the new path.
+
+## Agent dispatch (Phase 2A)
+
+The plan/approve/execute lifecycle. Each todo lives in its own folder:
+
+```
+~/.josh/todo/<state>/<ulid>/
+├── meta.json
+├── state                  one-line, mirrors parent dir
+├── plan.md                added in 'planning' state, persists into later states
+├── plan-review.json       added when plan submitted
+├── approval               absent | "pending" | "approved" | "rejected"
+├── handoff.md             written when state → done
+├── events.ndjson          append-only, 14-event taxonomy
+└── runtime.json           {harness, session_id, claimed_by, started_at}
+```
+
+States: `incoming → triaged → claimed → planning → awaiting_approval → approved → in_progress → done`.
+Side branches: `awaiting_approval → rejected`, any state → `blocked`/`failed`/`cancelled`, `awaiting_approval → revised → planning` (reserved for Phase 2B).
+
+### Lifecycle commands
+
+```
+josh claim <id> --agent A01 [--as actor]            triaged → claimed
+josh plan submit <id> --plan plan.md [--as actor]   claimed → awaiting_approval
+josh plan approve <id> [--as actor]                 awaiting_approval → approved
+josh plan reject  <id> --reason "..." [--as actor]  awaiting_approval → rejected
+josh tick                                            auto-promotes approved → in_progress
+josh complete <id> [--note "..."]                   in_progress → done (validates handoff.md)
+```
+
+### Plan template (8 sections, kesslerio)
+
+Required YAML frontmatter: `id`, `status` (PENDING|APPROVED|REVISED), `claimed_by`, `plan_hash`.
+Required H2 sections in this exact order: `Fast-Path`, `Problem statement`, `Current state evidence`,
+`Proposed approach`, `Step-by-step change list`, `Risks + rollback`, `Test plan`, `Approval prompt`.
+
+### Handoff template (9 fields)
+
+Required H2s in any order: `Task ID`, `Files changed`, `Decision`, `Open blockers`, `Risks`,
+`Downstream unblocked`, `Downstream blocked`, `Verification`, `Human review`. Each non-empty.
+
+### Approval signal
+
+`~/.josh/todo/<state>/<id>/approval` is the atomic-mv signal. `josh plan approve` writes `approved\n`;
+`josh tick` reads it from the `approved` directory and promotes the todo to `in_progress`. No model
+self-promotes a plan to execution.
 
 ## Operations: hybrid scheduler
 

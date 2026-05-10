@@ -32,6 +32,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { parseArgs } = require('util');
+const ew = require('./lib/events-writer');
 
 // ─── Paths ───────────────────────────────────────────────────────────────────
 
@@ -48,6 +49,12 @@ const SUBDIRS = [
   'orchestrator/processed',
   'todo/incoming',
   'todo/triaged',
+  'todo/claimed',
+  'todo/planning',
+  'todo/awaiting_approval',
+  'todo/approved',
+  'todo/rejected',
+  'todo/revised',
   'todo/in_progress',
   'todo/done',
   'todo/blocked',
@@ -202,6 +209,40 @@ function findById(id) {
   return suffixHit;
 }
 
+function findTodoFolderById(idOrSuffix) {
+  // Returns { path, folder, relative } where path → meta.json, OR null.
+  const ALL_STATES = [
+    'incoming', 'triaged', 'claimed', 'planning', 'awaiting_approval',
+    'approved', 'rejected', 'revised', 'in_progress', 'done',
+    'blocked', 'failed', 'cancelled',
+  ];
+  let exactHit = null;
+  let suffixHit = null;
+  for (const state of ALL_STATES) {
+    const dir = path.join(JOSH_ROOT, 'todo', state);
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { continue; }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      if (e.name === idOrSuffix) {
+        exactHit = { state, id: e.name };
+        break;
+      }
+      if (idOrSuffix.length >= 4 && idOrSuffix.length < 26 && e.name.endsWith(idOrSuffix)) {
+        if (!suffixHit) suffixHit = { state, id: e.name };
+      }
+    }
+    if (exactHit) break;
+  }
+  const hit = exactHit || suffixHit;
+  if (!hit) return null;
+  return {
+    path: path.join(JOSH_ROOT, 'todo', hit.state, hit.id, 'meta.json'),
+    folder: path.join(JOSH_ROOT, 'todo', hit.state, hit.id),
+    relative: `todo/${hit.state}/${hit.id}`,
+  };
+}
+
 // ─── Default actor (for created_by when --created-by not given) ──────────────
 
 function defaultActor() {
@@ -280,19 +321,43 @@ function errExit(msg, code) { err(`error: ${msg}`); return code; }
 // Locate a todo by full ID or last-N suffix and return its current state.
 // expectedStates: array of allowed states; if provided and not matched, returns error.
 function locateTodo(idOrSuffix, expectedStates) {
-  const found = findById(idOrSuffix);
-  if (!found) return { error: 'not found', code: 2 };
-  // Expect path: todo/<state>/<id>.json
-  const rel = found.relative.replace(/\\/g, '/');
-  if (!rel.startsWith('todo/')) return { error: `not a todo (in: ${rel})`, code: 1 };
-  const parts = rel.split('/');
-  if (parts.length !== 3) return { error: `unexpected path: ${rel}`, code: 1 };
-  const state = parts[1];
-  const id = parts[2].replace(/\.json$/, '');
-  if (expectedStates && !expectedStates.includes(state)) {
-    return { error: `todo is in state '${state}', expected one of: ${expectedStates.join(', ')}`, code: 1 };
+  // Folder layout: ~/.josh/todo/<state>/<id>/meta.json
+  const ALL_STATES = [
+    'incoming', 'triaged', 'claimed', 'planning', 'awaiting_approval',
+    'approved', 'rejected', 'revised', 'in_progress', 'done',
+    'blocked', 'failed', 'cancelled',
+  ];
+  let exactHit = null;
+  let suffixHit = null;
+  for (const state of ALL_STATES) {
+    const dir = path.join(JOSH_ROOT, 'todo', state);
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { continue; }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      if (e.name === idOrSuffix) {
+        exactHit = { state, id: e.name };
+        break;
+      }
+      if (idOrSuffix.length >= 4 && idOrSuffix.length < 26 && e.name.endsWith(idOrSuffix)) {
+        if (!suffixHit) suffixHit = { state, id: e.name };
+        else suffixHit.collision = true;
+      }
+    }
+    if (exactHit) break;
   }
-  return { path: found.path, state, id, relative: rel };
+  const hit = exactHit || suffixHit;
+  if (!hit) return { error: 'not found', code: 2 };
+  if (expectedStates && !expectedStates.includes(hit.state)) {
+    return { error: `todo is in state '${hit.state}', expected one of: ${expectedStates.join(', ')}`, code: 1 };
+  }
+  return {
+    path: path.join(JOSH_ROOT, 'todo', hit.state, hit.id, 'meta.json'),
+    folder: path.join(JOSH_ROOT, 'todo', hit.state, hit.id),
+    state: hit.state,
+    id: hit.id,
+    relative: `todo/${hit.state}/${hit.id}`,
+  };
 }
 
 // Atomic move from src state to dst state. Returns 0 on success or error code.
@@ -301,12 +366,16 @@ function transitionTodo({ src, dst, srcStates, idOrSuffix, actor, eventName, eve
   const located = locateTodo(idOrSuffix, srcStates);
   if (located.error) return { code: located.code, error: located.error };
 
-  const fromPath = located.path;
-  const toPath = path.join(JOSH_ROOT, 'todo', dst, `${located.id}.json`);
+  const fromDir = located.folder;
+  const toDir = path.join(JOSH_ROOT, 'todo', dst, located.id);
+  if (fs.existsSync(toDir)) {
+    return { code: 4, error: `target already exists: todo/${dst}/${located.id}` };
+  }
 
-  // Atomic move = lock acquisition.
+  // Atomic rename of the entire folder = lock acquisition.
   try {
-    fs.renameSync(fromPath, toPath);
+    fs.mkdirSync(path.dirname(toDir), { recursive: true });
+    fs.renameSync(fromDir, toDir);
   } catch (e) {
     if (e.code === 'ENOENT') return { code: 3, error: `todo no longer in ${located.state} (race?)` };
     if (e.code === 'EEXIST' || e.code === 'EPERM' || e.code === 'EACCES') {
@@ -315,14 +384,48 @@ function transitionTodo({ src, dst, srcStates, idOrSuffix, actor, eventName, eve
     throw e;
   }
 
-  // Now we own the file at toPath. Read, mutate, write.
-  const todo = readJson(toPath);
-  if (!todo) return { code: 4, error: `malformed todo at ${dst}/${located.id}.json` };
-  todo.history = todo.history || [];
-  const now = new Date().toISOString();
-  todo.history.push({ at: now, actor, event: eventName, details: eventDetails || {} });
-  if (typeof update === 'function') update(todo, now);
-  writeJsonAtomic(toPath, todo);
+  // We own the folder at toDir. Read meta, mutate, write.
+  // If anything in this block fails (malformed meta, update() throws, write fails),
+  // best-effort rename the folder back to fromDir so the state machine isn't
+  // left with a todo physically in dst/ but no audit/event record of the move.
+  const metaPath = path.join(toDir, 'meta.json');
+  let todo;
+  try {
+    todo = readJson(metaPath);
+    if (!todo) {
+      const e = new Error(`malformed meta.json at ${dst}/${located.id}`);
+      e.code = 4;
+      throw e;
+    }
+    todo.history = todo.history || [];
+    const now = new Date().toISOString();
+    todo.history.push({ at: now, actor, event: eventName, details: eventDetails || {} });
+    if (typeof update === 'function') update(todo, now);
+    writeJsonAtomic(metaPath, todo);
+    // Sync the one-line state file.
+    try { fs.writeFileSync(path.join(toDir, 'state'), dst + '\n', 'utf8'); } catch (e) { /* non-fatal */ }
+  } catch (e) {
+    // Rollback: undo the rename so the todo isn't stranded in dst/.
+    let rollbackErr = null;
+    try { fs.renameSync(toDir, fromDir); } catch (re) { rollbackErr = re; }
+    const msg = e && e.message ? e.message : String(e);
+    if (rollbackErr) {
+      err(`transitionTodo rollback also failed for ${located.id}: ${rollbackErr.message}`);
+    }
+    return { code: (e && e.code === 4) ? 4 : 4, error: msg };
+  }
+
+  // Lifecycle event: every transition emits a "start" event in the new state's folder.
+  // Best-effort — never fail the transition over a missing event line.
+  try {
+    ew.appendEvent(JOSH_ROOT, dst, located.id, {
+      kind: 'start',
+      state: dst,
+      from: located.state,
+      actor,
+      event: eventName,
+    });
+  } catch (e) { /* non-fatal */ }
 
   if (audit) appendAudit({ actor, action: audit.action, id: located.id, details: audit.details || {} });
 
@@ -399,12 +502,16 @@ function listJsonIn(dir) {
   } catch (e) { return []; }
 }
 
-function moveTodo(fromPath, toState, todo) {
+function moveTodo(fromMetaPath, toState, todo) {
+  // fromMetaPath is a path to ~/.josh/todo/<state>/<id>/meta.json.
+  const fromDir = path.dirname(fromMetaPath);
   const id = todo.id;
-  const toPath = path.join(JOSH_ROOT, 'todo', toState, `${id}.json`);
-  // Re-write with updated history, then atomic rename
-  writeJsonAtomic(fromPath, todo);
-  fs.renameSync(fromPath, toPath);
+  const toDir = path.join(JOSH_ROOT, 'todo', toState, id);
+  // Re-write meta with updated history first, then rename the folder.
+  writeJsonAtomic(fromMetaPath, todo);
+  fs.mkdirSync(path.dirname(toDir), { recursive: true });
+  fs.renameSync(fromDir, toDir);
+  try { fs.writeFileSync(path.join(toDir, 'state'), toState + '\n', 'utf8'); } catch (e) { /* non-fatal */ }
 }
 
 // Read routing config from ~/.josh/orchestrator/routing.json. Returns null if missing.
@@ -431,13 +538,18 @@ function applyRouting(todo, cfg) {
   return { agent: cfg.default_agent || 'auto' };
 }
 
-function triageOne(file, opts, routingCfg) {
-  const todo = readJson(file.path);
+function triageOne(folderEntry, opts, routingCfg) {
+  // folderEntry: { dir, id }  where dir is full path to the per-todo folder under incoming/
+  const metaPath = path.join(folderEntry.dir, 'meta.json');
+  const todo = readJson(metaPath);
   if (!todo) {
-    err(`warn: skipping malformed ${file.path}; moving to failed/`);
-    const failedPath = path.join(JOSH_ROOT, 'todo', 'failed', file.name);
-    try { fs.renameSync(file.path, failedPath); } catch (e) {}
-    appendAudit({ actor: 'orchestrator', action: 'todo.malformed', id: file.name, details: {} });
+    err(`warn: skipping malformed ${metaPath}; moving folder to failed/`);
+    const failedDir = path.join(JOSH_ROOT, 'todo', 'failed', folderEntry.id);
+    try {
+      fs.mkdirSync(path.dirname(failedDir), { recursive: true });
+      fs.renameSync(folderEntry.dir, failedDir);
+    } catch (e) {}
+    appendAudit({ actor: 'orchestrator', action: 'todo.malformed', id: folderEntry.id, details: {} });
     return { result: 'malformed' };
   }
   const now = new Date().toISOString();
@@ -459,7 +571,7 @@ function triageOne(file, opts, routingCfg) {
       ? { details: { routed_from: routedFrom, routed_to: route.agent, matched_rule: route.matched_rule || null } }
       : {})
   });
-  moveTodo(file.path, 'triaged', todo);
+  moveTodo(metaPath, 'triaged', todo);
   appendAudit({
     actor: 'orchestrator',
     action: 'todo.triaged',
@@ -523,14 +635,17 @@ function expireApprovals() {
 function sweepStaleClaims(opts) {
   let swept = 0;
   const dir = path.join(JOSH_ROOT, 'todo', 'in_progress');
-  for (const file of listJsonIn(dir)) {
-    const todo = readJson(file.path);
+  let entries = [];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) {}
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const metaPath = path.join(dir, e.name, 'meta.json');
+    const todo = readJson(metaPath);
     if (!todo) continue;
     if (!todo.claim || !todo.claim.at || !todo.claim.ttl_sec) continue;
     const claimAt = new Date(todo.claim.at).getTime();
     const expiresAt = claimAt + todo.claim.ttl_sec * 1000;
     if (Date.now() < expiresAt) continue;
-    // Stale: move back to triaged with claim cleared.
     const previousHolder = todo.claim.by;
     const previousTtl = todo.claim.ttl_sec;
     todo.claim = null;
@@ -541,7 +656,7 @@ function sweepStaleClaims(opts) {
       event: 'claim_expired',
       details: { previous_holder: previousHolder, ttl_sec: previousTtl }
     });
-    moveTodo(file.path, 'triaged', todo);
+    moveTodo(metaPath, 'triaged', todo);
     appendAudit({
       actor: 'orchestrator',
       action: 'todo.claim_expired',
@@ -551,6 +666,42 @@ function sweepStaleClaims(opts) {
     swept++;
   }
   return swept;
+}
+
+function promoteApproved() {
+  let promoted = 0;
+  const dir = path.join(JOSH_ROOT, 'todo', 'approved');
+  let entries = [];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return 0; }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const id = e.name;
+    const folder = path.join(dir, id);
+    // Confirm approval signal == "approved" before promoting.
+    const signalPath = path.join(folder, 'approval');
+    let signal = '';
+    try { signal = fs.readFileSync(signalPath, 'utf8').trim(); } catch (err) {}
+    if (signal !== 'approved') continue;
+    const metaPath = path.join(folder, 'meta.json');
+    const todo = readJson(metaPath);
+    if (!todo) continue;
+    todo.history = todo.history || [];
+    todo.history.push({
+      at: new Date().toISOString(),
+      actor: 'orchestrator',
+      event: 'auto_promoted',
+      details: { from: 'approved', to: 'in_progress' },
+    });
+    moveTodo(metaPath, 'in_progress', todo);
+    appendAudit({
+      actor: 'orchestrator',
+      action: 'todo.auto_promoted',
+      id: todo.id,
+      details: { from: 'approved', to: 'in_progress' },
+    });
+    promoted++;
+  }
+  return promoted;
 }
 
 function processControlOne(file) {
@@ -605,14 +756,14 @@ function processControlOne(file) {
       }
       let touched = false;
       for (const state of ['incoming', 'triaged', 'blocked']) {
-        const filePath = path.join(JOSH_ROOT, 'todo', state, `${todoId}.json`);
-        if (!fs.existsSync(filePath)) continue;
-        const todo = readJson(filePath);
+        const metaPath = path.join(JOSH_ROOT, 'todo', state, todoId, 'meta.json');
+        if (!fs.existsSync(metaPath)) continue;
+        const todo = readJson(metaPath);
         if (!todo) continue;
         const oldPri = todo.priority;
         todo.priority = newPri;
         todo.history.push({ at: new Date().toISOString(), actor: 'orchestrator', event: 'reordered', details: { from: oldPri, to: newPri } });
-        writeJsonAtomic(filePath, todo);
+        writeJsonAtomic(metaPath, todo);
         touched = true;
         appendAudit({ actor: 'orchestrator', action: 'todo.reordered', id: todoId, details: { from: oldPri, to: newPri } });
         break;
@@ -805,12 +956,16 @@ function cmdPushTodo(args) {
     history: [{ at: now, actor: createdBy, event: 'created' }]
   };
 
-  const filepath = path.join(JOSH_ROOT, 'todo', 'incoming', `${id}.json`);
-  if (!fs.existsSync(path.dirname(filepath))) {
-    err(`error: ${path.dirname(filepath)} does not exist. run 'josh init' first.`);
+  const incomingDir = path.join(JOSH_ROOT, 'todo', 'incoming');
+  if (!fs.existsSync(incomingDir)) {
+    err(`error: ${incomingDir} does not exist. run 'josh init' first.`);
     return 4;
   }
-  writeJsonAtomic(filepath, todo);
+  const todoDir = path.join(incomingDir, id);
+  fs.mkdirSync(todoDir, { recursive: true });
+  writeJsonAtomic(path.join(todoDir, 'meta.json'), todo);
+  fs.writeFileSync(path.join(todoDir, 'state'), 'incoming\n', 'utf8');
+  fs.writeFileSync(path.join(todoDir, 'events.ndjson'), '', 'utf8');
 
   appendAudit({
     actor: createdBy,
@@ -866,8 +1021,15 @@ function cmdListTodo(args) {
     return 1;
   }
 
-  const allStates = ['incoming', 'triaged', 'in_progress', 'blocked', 'done', 'failed', 'cancelled'];
-  const liveStates = ['incoming', 'triaged', 'in_progress', 'blocked'];
+  const allStates = [
+    'incoming', 'triaged', 'claimed', 'planning', 'awaiting_approval',
+    'approved', 'rejected', 'revised', 'in_progress', 'done',
+    'blocked', 'failed', 'cancelled',
+  ];
+  const liveStates = [
+    'incoming', 'triaged', 'claimed', 'planning', 'awaiting_approval',
+    'approved', 'in_progress', 'blocked',
+  ];
   const states = parsed.values.state
     ? (parsed.values.state === 'all' ? allStates : [parsed.values.state])
     : liveStates;
@@ -882,10 +1044,11 @@ function cmdListTodo(args) {
   const todos = [];
   for (const state of states) {
     const dir = path.join(JOSH_ROOT, 'todo', state);
-    let files;
-    try { files = fs.readdirSync(dir).filter(f => f.endsWith('.json')); } catch (e) { continue; }
-    for (const f of files) {
-      const todo = readJson(path.join(dir, f));
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { continue; }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      const todo = readJson(path.join(dir, e.name, 'meta.json'));
       if (!todo) continue;
       if (parsed.values.agent && todo.agent !== parsed.values.agent) continue;
       if (parsed.values.priority && todo.priority !== parsed.values.priority) continue;
@@ -929,6 +1092,16 @@ function cmdShow(args) {
   if (!id) {
     err('error: id required. usage: josh show <id>');
     return 1;
+  }
+
+  // Look in todo/<state>/<id>/meta.json first.
+  const todoFound = findTodoFolderById(id);
+  if (todoFound) {
+    log(`# ${todoFound.relative}/meta.json`);
+    const obj = readJson(todoFound.path);
+    if (obj) log(JSON.stringify(obj, null, 2));
+    else log(fs.readFileSync(todoFound.path, 'utf8'));
+    return 0;
   }
 
   const found = findById(id);
@@ -1010,8 +1183,12 @@ function cmdTick(args) {
     // 4. Triage incoming → triaged (skip if paused; allow during drain)
     if (!paused) {
       const incomingDir = path.join(JOSH_ROOT, 'todo', 'incoming');
-      for (const file of listJsonIn(incomingDir)) {
-        const r = triageOne(file, null, routingCfg);
+      let entries = [];
+      try { entries = fs.readdirSync(incomingDir, { withFileTypes: true }); } catch (e) {}
+      for (const e of entries) {
+        if (!e.isDirectory()) continue;
+        const folderEntry = { dir: path.join(incomingDir, e.name), id: e.name };
+        const r = triageOne(folderEntry, null, routingCfg);
         if (r.result === 'triaged') {
           triaged++;
           if (r.routed) routed++;
@@ -1021,6 +1198,10 @@ function cmdTick(args) {
 
     // 5. Sweep stale claims
     swept = sweepStaleClaims();
+
+    // 5b. Promote approved → in_progress (Phase 2A dispatch)
+    let promoted = 0;
+    if (!paused) promoted = promoteApproved();
 
     // 6. Auto-resolve expired approvals (default decision applied)
     expired = expireApprovals();
@@ -1051,6 +1232,7 @@ function cmdTick(args) {
         routed,
         triaged_failed: triagedFailed,
         swept,
+        promoted,
         expired_approvals: expired,
         paused,
         draining,
@@ -1062,11 +1244,11 @@ function cmdTick(args) {
     const tickN = status.agents.orchestrator.tick_count;
     if (verbose) {
       log(`tick ${tickN} @ ${status.agents.orchestrator.last_tick}`);
-      log(`  controls: ${controlsProcessed}  triaged: ${triaged} (routed: ${routed})  swept: ${swept}  expired: ${expired}  failed: ${triagedFailed}`);
+      log(`  controls: ${controlsProcessed}  triaged: ${triaged} (routed: ${routed})  swept: ${swept}  promoted: ${promoted}  expired: ${expired}  failed: ${triagedFailed}`);
       log(`  paused: ${paused}  draining: ${draining}`);
       log(`  queue: incoming=${status.queue.incoming} triaged=${status.queue.triaged} in_progress=${status.queue.in_progress}`);
     } else {
-      log(`tick ${tickN}: triaged=${triaged}${routed > 0 ? ` (routed:${routed})` : ''} swept=${swept} expired=${expired} controls=${controlsProcessed}${paused ? ' [paused]' : ''}${draining ? ' [draining]' : ''}`);
+      log(`tick ${tickN}: triaged=${triaged}${routed > 0 ? ` (routed:${routed})` : ''} swept=${swept} promoted=${promoted} expired=${expired} controls=${controlsProcessed}${paused ? ' [paused]' : ''}${draining ? ' [draining]' : ''}`);
     }
   } finally {
     lockRelease();
@@ -1162,7 +1344,8 @@ function cmdClaim(args) {
       options: {
         as:    { type: 'string' },
         actor: { type: 'string' },
-        ttl:   { type: 'string' }
+        ttl:   { type: 'string' },
+        agent: { type: 'string' },
       },
       allowPositionals: true,
       strict: true
@@ -1178,6 +1361,57 @@ function cmdClaim(args) {
     return errExit('--ttl must be in [1, 86400] seconds', 1);
   }
 
+  const agentId = parsed.values.agent || null;
+
+  // If --agent given, take the dispatch path (triaged → claimed) with brief injection.
+  if (agentId) {
+    // Pre-flight: locate, check primary_role.
+    const located = locateTodo(idArg, ['triaged']);
+    if (located.error) return errExit(located.error, located.code);
+    const todo = readJson(located.path);
+    if (!todo) return errExit(`malformed todo at ${located.relative}`, 4);
+    if (todo.primary_role !== agentId) {
+      return errExit(`todo primary_role is '${todo.primary_role || '<unset>'}', expected '${agentId}'`, 1);
+    }
+    // Load brief (asserts manifest + source exist).
+    let brief;
+    try {
+      const { loadBrief } = require('./lib/agent-brief');
+      brief = loadBrief(JOSH_ROOT, agentId);
+    } catch (e) {
+      return errExit(e.message, 2);
+    }
+    // Transition triaged → claimed. Stamp agent_brief_path. Write runtime.json.
+    const r = transitionTodo({
+      srcStates: ['triaged'],
+      dst: 'claimed',
+      idOrSuffix: idArg,
+      actor,
+      eventName: 'claimed',
+      eventDetails: { ttl_sec: ttlSec, agent_id: agentId },
+      update: (t, now) => {
+        t.claim = { by: actor, at: now, ttl_sec: ttlSec, agent_id: agentId };
+        t.agent_brief_path = brief.path;
+      },
+      audit: { action: 'todo.claimed', details: { ttl_sec: ttlSec, agent_id: agentId } }
+    });
+    if (r.error) return errExit(r.error, r.code);
+    // After move, write runtime.json next to meta.json.
+    const claimedFolder = path.join(JOSH_ROOT, 'todo', 'claimed', r.id);
+    const runtime = {
+      schema: 1,
+      harness: process.env.JOSH_HARNESS || 'unknown',
+      session_id: process.env.JOSH_SESSION_ID || null,
+      claimed_by: agentId,
+      actor,
+      started_at: new Date().toISOString(),
+    };
+    writeJsonAtomic(path.join(claimedFolder, 'runtime.json'), runtime);
+    log(r.id);
+    return 0;
+  }
+
+  // Backward-compatible path: triaged → in_progress (no --agent).
   const r = transitionTodo({
     srcStates: ['triaged'],
     dst: 'in_progress',
@@ -1201,10 +1435,11 @@ function cmdComplete(args) {
     parsed = parseArgs({
       args,
       options: {
-        as:            { type: 'string' },
-        actor:         { type: 'string' },
-        note:          { type: 'string' },
-        'skip-verify': { type: 'boolean' }
+        as:             { type: 'string' },
+        actor:          { type: 'string' },
+        note:           { type: 'string' },
+        'skip-verify':  { type: 'boolean' },
+        'skip-handoff': { type: 'boolean' },
       },
       allowPositionals: true,
       strict: true
@@ -1216,7 +1451,7 @@ function cmdComplete(args) {
 
   const actor = resolveActor(parsed.values);
 
-  // Locate first so we can run verify before the move.
+  // Locate first so we can run verify + handoff check before the move.
   const located = locateTodo(idArg, ['in_progress']);
   if (located.error) return errExit(located.error, located.code);
 
@@ -1231,6 +1466,22 @@ function cmdComplete(args) {
       err(`exit code: ${e.status}`);
       if (e.stderr) err(`stderr: ${e.stderr.toString().trim()}`);
       return errExit('verification failed; not completing. use --skip-verify to override or `josh fail` to mark failed', 1);
+    }
+  }
+
+  // Handoff check (Phase 2A): handoff.md must exist + validate, unless --skip-handoff.
+  if (!parsed.values['skip-handoff']) {
+    const handoffPath = path.join(located.folder, 'handoff.md');
+    if (!fs.existsSync(handoffPath)) {
+      return errExit(`handoff.md not found at ${path.relative(JOSH_ROOT, handoffPath).replace(/\\/g, '/')}; write the 9-field handoff before completing (or pass --skip-handoff)`, 1);
+    }
+    const text = fs.readFileSync(handoffPath, 'utf8');
+    const { validateHandoff } = require('./lib/handoff-validator');
+    const v = validateHandoff(text);
+    if (!v.ok) {
+      err('handoff.md validation failed:');
+      for (const e of v.errors) err(`  - ${e}`);
+      return 1;
     }
   }
 
@@ -1249,6 +1500,15 @@ function cmdComplete(args) {
     audit: { action: 'todo.completed', details: parsed.values.note ? { note: parsed.values.note } : {} }
   });
   if (r.error) return errExit(r.error, r.code);
+  // Lifecycle event: terminal "done" with success=true.
+  try {
+    ew.appendEvent(JOSH_ROOT, 'done', r.id, {
+      kind: 'done',
+      success: true,
+      actor,
+      ...(parsed.values.note ? { note: parsed.values.note } : {}),
+    });
+  } catch (e) { /* non-fatal */ }
   log(r.id);
   return 0;
 }
@@ -1289,6 +1549,14 @@ function cmdFail(args) {
     audit: { action: 'todo.failed', details: { reason } }
   });
   if (r.error) return errExit(r.error, r.code);
+  // Lifecycle event: terminal "failed" with reason.
+  try {
+    ew.appendEvent(JOSH_ROOT, 'failed', r.id, {
+      kind: 'failed',
+      reason,
+      actor,
+    });
+  } catch (e) { /* non-fatal */ }
   log(r.id);
   return 0;
 }
@@ -2448,7 +2716,7 @@ function validateControl(c) {
 function validatorFor(rel) {
   const norm = rel.replace(/\\/g, '/');
   if (norm === 'status.json') return { kind: 'root-status', fn: validateStatus };
-  if (norm.match(/^todo\/(incoming|triaged|in_progress|done|blocked|failed|cancelled)\/.+\.json$/)) {
+  if (norm.match(/^todo\/(incoming|triaged|claimed|planning|awaiting_approval|approved|rejected|revised|in_progress|done|blocked|failed|cancelled)\/[^/]+\/meta\.json$/)) {
     return { kind: 'todo', fn: validateTodo };
   }
   if (norm.match(/^(claude|codex|orchestrator)\/(incoming|processed)\/.+\.json$/)) {
@@ -2544,6 +2812,300 @@ function cmdValidate(args) {
   return parsed.values.strict && results.errors.length > 0 ? 1 : 0;
 }
 
+function cmdProject(args) {
+  const sub = args[0];
+  const rest = args.slice(1);
+  if (!sub || sub === 'help' || sub === '--help' || sub === '-h') {
+    log(`Usage: josh project <subcommand>
+
+Subcommands:
+  import <corpus-path>    Import a Markdown corpus (project + agents + todos)
+  status [--project ID]   Render the daily-review template
+  sync [--project ID]     Refresh imported entities from source files`);
+    return 0;
+  }
+  switch (sub) {
+    case 'import':  return cmdProjectImport(rest);
+    case 'status':  return cmdProjectStatus(rest);
+    case 'sync':    return cmdProjectSync(rest);
+    default:
+      err(`unknown project subcommand: ${sub}`);
+      return 1;
+  }
+}
+
+function cmdProjectImport(args) {
+  if (args.length < 1 || args[0].startsWith('-')) {
+    err('usage: josh project import <corpus-path>');
+    return 1;
+  }
+  const corpusPath = path.resolve(args[0]);
+  if (!fs.existsSync(corpusPath)) {
+    err(`error: corpus path does not exist: ${corpusPath}`);
+    return 2;
+  }
+  const { importProject } = require('./lib/project-importer');
+  const actor = defaultActor();
+  try {
+    const result = importProject(corpusPath, { joshRoot: JOSH_ROOT, actor });
+    log(`imported project ${result.project_id}`);
+    log(`  todos:  ${result.todo_count}`);
+    log(`  agents: ${result.agent_count}`);
+    return 0;
+  } catch (e) {
+    err(`import failed: ${e.message}`);
+    if (process.env.JOSH_DEBUG) err(e.stack);
+    return 4;
+  }
+}
+
+function cmdProjectStatus(args) {
+  const { renderDailyReview } = require('./lib/project-status');
+  let projectId = null;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--project') {
+      projectId = args[++i];
+    }
+  }
+  if (!projectId) {
+    const projectsDir = path.join(JOSH_ROOT, 'projects');
+    if (!fs.existsSync(projectsDir)) {
+      err('no projects imported yet');
+      return 2;
+    }
+    const ids = fs.readdirSync(projectsDir).filter((d) =>
+      fs.statSync(path.join(projectsDir, d)).isDirectory()
+    );
+    if (ids.length === 0) {
+      err('no projects imported yet');
+      return 2;
+    }
+    if (ids.length > 1) {
+      err(`multiple projects exist; specify one with --project <id>`);
+      err(`available: ${ids.join(', ')}`);
+      return 1;
+    }
+    projectId = ids[0];
+  }
+  try {
+    log(renderDailyReview(projectId, { joshRoot: JOSH_ROOT }));
+    return 0;
+  } catch (e) {
+    err(e.message);
+    return 2;
+  }
+}
+
+function cmdProjectSync(args) {
+  const { applySync } = require('./lib/project-sync');
+  let projectId = null;
+  let dryRun = false;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--project') projectId = args[++i];
+    else if (args[i] === '--dry-run') dryRun = true;
+  }
+  if (!projectId) {
+    const projectsDir = path.join(JOSH_ROOT, 'projects');
+    if (!fs.existsSync(projectsDir)) {
+      err('no projects imported yet');
+      return 2;
+    }
+    const ids = fs.readdirSync(projectsDir).filter((d) =>
+      fs.statSync(path.join(projectsDir, d)).isDirectory()
+    );
+    if (ids.length === 0) { err('no projects imported yet'); return 2; }
+    if (ids.length > 1) {
+      err('multiple projects exist; specify one with --project <id>');
+      return 1;
+    }
+    projectId = ids[0];
+  }
+  try {
+    const result = applySync(projectId, { joshRoot: JOSH_ROOT, actor: defaultActor(), dryRun });
+    log(`sync ${result.dry_run ? '(dry-run) ' : ''}for project ${result.project_id}`);
+    log(`  agents:  changed=${result.agents_changed} missing=${result.agents_missing} updated=${result.agents_updated}`);
+    log(`  tasks:   changed=${result.tasks_changed} missing=${result.tasks_missing} updated=${result.tasks_updated}`);
+    return 0;
+  } catch (e) {
+    err(e.message);
+    if (process.env.JOSH_DEBUG) err(e.stack);
+    return 4;
+  }
+}
+
+function cmdPlan(args) {
+  const sub = args[0];
+  const rest = args.slice(1);
+  if (!sub || sub === 'help' || sub === '--help' || sub === '-h') {
+    log(`Usage: josh plan <subcommand>
+
+Subcommands:
+  submit <todo-id> --plan <path>          claimed → awaiting_approval (validates 8-section plan)
+  approve <todo-id>                       awaiting_approval → approved (writes approval signal)
+  reject <todo-id> --reason "..."         awaiting_approval → rejected`);
+    return 0;
+  }
+  switch (sub) {
+    case 'submit':  return cmdPlanSubmit(rest);
+    case 'approve': return cmdPlanApprove(rest);
+    case 'reject':  return cmdPlanReject(rest);
+    default:
+      err(`unknown plan subcommand: ${sub}`);
+      return 1;
+  }
+}
+
+function cmdPlanSubmit(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        plan:  { type: 'string' },
+        as:    { type: 'string' },
+        actor: { type: 'string' },
+      },
+      allowPositionals: true,
+      strict: true,
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const idArg = parsed.positionals[0];
+  if (!idArg) return errExit('plan submit requires <todo-id>', 1);
+  const planPath = parsed.values.plan;
+  if (!planPath) return errExit('plan submit requires --plan <path>', 1);
+  if (!fs.existsSync(planPath)) return errExit(`plan file not found: ${planPath}`, 2);
+
+  const actor = resolveActor(parsed.values);
+  const planText = fs.readFileSync(planPath, 'utf8');
+  const { validatePlan } = require('./lib/plan-validator');
+  const v = validatePlan(planText);
+  if (!v.ok) {
+    err('plan validation failed:');
+    for (const e of v.errors) err(`  - ${e}`);
+    return 1;
+  }
+
+  // Transition claimed → awaiting_approval (single move; planning state is logged in history).
+  const r = transitionTodo({
+    srcStates: ['claimed'],
+    dst: 'awaiting_approval',
+    idOrSuffix: idArg,
+    actor,
+    eventName: 'plan_submitted',
+    eventDetails: { plan_id: v.frontmatter.id, plan_status: v.frontmatter.status },
+    update: (t, now) => {
+      t.history.push({ at: now, actor, event: 'planning', details: { plan_id: v.frontmatter.id } });
+      t.plan_id = v.frontmatter.id;
+    },
+    audit: { action: 'todo.plan_submitted', details: { plan_id: v.frontmatter.id } },
+  });
+  if (r.error) return errExit(r.error, r.code);
+
+  // After the move, the folder is at awaiting_approval/<id>/.
+  const folder = path.join(JOSH_ROOT, 'todo', 'awaiting_approval', r.id);
+  // Copy plan.md into the folder.
+  fs.writeFileSync(path.join(folder, 'plan.md'), planText, 'utf8');
+  // Write plan-review.json.
+  const planReview = {
+    schema_version: 1,
+    plan_id: v.frontmatter.id,
+    submitted_at: new Date().toISOString(),
+    submitted_by: actor,
+    ready_for_implementation: false,
+    blocking_decisions: [],
+    section_count: v.sections.length,
+  };
+  writeJsonAtomic(path.join(folder, 'plan-review.json'), planReview);
+  // Write approval signal file (atomic-mv pattern).
+  fs.writeFileSync(path.join(folder, 'approval'), 'pending\n', 'utf8');
+
+  log(r.id);
+  return 0;
+}
+
+function cmdPlanApprove(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        as:    { type: 'string' },
+        actor: { type: 'string' },
+        note:  { type: 'string' },
+      },
+      allowPositionals: true,
+      strict: true,
+    });
+  } catch (e) { return errExit(e.message, 1); }
+  const idArg = parsed.positionals[0];
+  if (!idArg) return errExit('plan approve requires <todo-id>', 1);
+  const actor = resolveActor(parsed.values);
+
+  const r = transitionTodo({
+    srcStates: ['awaiting_approval'],
+    dst: 'approved',
+    idOrSuffix: idArg,
+    actor,
+    eventName: 'plan_approved',
+    eventDetails: parsed.values.note ? { note: parsed.values.note } : {},
+    update: (t, now) => {
+      t.plan_approved_at = now;
+      t.plan_approved_by = actor;
+    },
+    audit: { action: 'todo.plan_approved', details: parsed.values.note ? { note: parsed.values.note } : {} },
+  });
+  if (r.error) return errExit(r.error, r.code);
+
+  // Update the approval signal file in the new location.
+  const folder = path.join(JOSH_ROOT, 'todo', 'approved', r.id);
+  try { fs.writeFileSync(path.join(folder, 'approval'), 'approved\n', 'utf8'); } catch (e) { /* non-fatal */ }
+  log(r.id);
+  return 0;
+}
+
+function cmdPlanReject(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        as:     { type: 'string' },
+        actor:  { type: 'string' },
+        reason: { type: 'string' },
+      },
+      allowPositionals: true,
+      strict: true,
+    });
+  } catch (e) { return errExit(e.message, 1); }
+  const idArg = parsed.positionals[0];
+  if (!idArg) return errExit('plan reject requires <todo-id>', 1);
+  const reason = parsed.values.reason;
+  if (!reason) return errExit('plan reject requires --reason "<text>"', 1);
+  const actor = resolveActor(parsed.values);
+
+  const r = transitionTodo({
+    srcStates: ['awaiting_approval'],
+    dst: 'rejected',
+    idOrSuffix: idArg,
+    actor,
+    eventName: 'plan_rejected',
+    eventDetails: { reason },
+    update: (t, now) => {
+      t.plan_rejected_at = now;
+      t.plan_rejected_by = actor;
+      t.plan_rejection_reason = reason;
+    },
+    audit: { action: 'todo.plan_rejected', details: { reason } },
+  });
+  if (r.error) return errExit(r.error, r.code);
+
+  const folder = path.join(JOSH_ROOT, 'todo', 'rejected', r.id);
+  try { fs.writeFileSync(path.join(folder, 'approval'), 'rejected\n', 'utf8'); } catch (e) { /* non-fatal */ }
+  log(r.id);
+  return 0;
+}
+
 function cmdHelp() {
   log(`josh — CLI for the ~/.josh/ shared agent runtime`);
   log(``);
@@ -2597,6 +3159,21 @@ function cmdHelp() {
   log(`  lock release <resource>                                release a lock`);
   log(`  lock list [--json]                                     list held locks`);
   log(`  list locks                    alias for lock list`);
+  log(``);
+  log(`project ops:`);
+  log(`  josh project import <corpus-path>          import a Markdown corpus (project + agents + todos)`);
+  log(`  josh project status [--project ID]         render the daily-review template`);
+  log(`  josh project sync   [--project ID] [--dry-run]   refresh imported entities from source`);
+  log(``);
+  log(`agent dispatch (Phase 2A — plan/approve/execute):`);
+  log(`  claim <id> --agent A01 [--as actor] [--ttl 3600]`);
+  log(`         triaged → claimed; injects agent brief reference + writes runtime.json`);
+  log(`  plan submit <id> --plan <path> [--as actor]    claimed → awaiting_approval`);
+  log(`  plan approve <id> [--as actor] [--note "..."]  awaiting_approval → approved`);
+  log(`  plan reject <id> --reason "..." [--as actor]   awaiting_approval → rejected`);
+  log(`  complete <id> [--note "..."] [--skip-handoff] [--skip-verify]`);
+  log(`         in_progress → done; requires valid 9-field handoff.md`);
+  log(`         (next 'josh tick' auto-promotes approved → in_progress)`);
   log(``);
   log(`  help                          show this message`);
   log(`  version                       show CLI version`);
@@ -2656,6 +3233,8 @@ const COMMANDS = {
   deny: cmdDeny,
   review: cmdReview,
   validate: cmdValidate,
+  project: cmdProject,
+  plan: cmdPlan,
   lock: cmdLock,
   help: cmdHelp,
   '--help': cmdHelp,
