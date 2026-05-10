@@ -486,3 +486,32 @@ test('cli: tick refuses to promote approved → in_progress when backpressure fu
 
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+test('cli: tick sweeps doom-looped todos to blocked/', () => {
+  const root = setupRoot();
+
+  const dir = path.join(root, 'todo', 'failed', '01LOOP');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify({
+    schema: 1,
+    id: '01LOOP',
+    history: [
+      { at: '2026-05-10T01:00:00Z', actor: 'A01', event: 'failed' },
+      { at: '2026-05-10T02:00:00Z', actor: 'A01', event: 'failed' },
+      { at: '2026-05-10T03:00:00Z', actor: 'A01', event: 'failed' },
+    ],
+  }, null, 2));
+  fs.writeFileSync(path.join(dir, 'state'), 'failed\n');
+  fs.writeFileSync(path.join(dir, 'events.ndjson'), '');
+
+  const out = runCli('tick', { JOSH_ROOT: root });
+  assert.match(out, /doom_looped=1/);
+  assert.equal(fs.existsSync(path.join(root, 'todo', 'failed', '01LOOP')), false);
+  assert.equal(fs.existsSync(path.join(root, 'todo', 'blocked', '01LOOP')), true);
+
+  const meta = JSON.parse(fs.readFileSync(
+    path.join(root, 'todo', 'blocked', '01LOOP', 'meta.json'), 'utf8'));
+  assert.match(meta.blocked_reason, /doom-loop-detected:3/);
+
+  fs.rmSync(root, { recursive: true, force: true });
+});

@@ -1213,6 +1213,21 @@ function cmdTick(args) {
       throttled = r.throttled;
     }
 
+    // 5c. Phase 3: doom-loop sweep — push repeated-failure todos to blocked/
+    let doomLooped = 0;
+    if (!paused) {
+      const { sweepDoomLoops } = require('./lib/doom-loop');
+      doomLooped = sweepDoomLoops(JOSH_ROOT);
+      if (doomLooped > 0) {
+        appendAudit({
+          actor: 'orchestrator',
+          action: 'todo.doom_loop_swept',
+          id: null,
+          details: { count: doomLooped },
+        });
+      }
+    }
+
     // 6. Auto-resolve expired approvals (default decision applied)
     expired = expireApprovals();
 
@@ -1244,6 +1259,7 @@ function cmdTick(args) {
         swept,
         promoted,
         throttled,
+        doom_looped: doomLooped,
         expired_approvals: expired,
         paused,
         draining,
@@ -1255,11 +1271,11 @@ function cmdTick(args) {
     const tickN = status.agents.orchestrator.tick_count;
     if (verbose) {
       log(`tick ${tickN} @ ${status.agents.orchestrator.last_tick}`);
-      log(`  controls: ${controlsProcessed}  triaged: ${triaged} (routed: ${routed})  swept: ${swept}  promoted: ${promoted}  throttled: ${throttled}  expired: ${expired}  failed: ${triagedFailed}`);
+      log(`  controls: ${controlsProcessed}  triaged: ${triaged} (routed: ${routed})  swept: ${swept}  promoted: ${promoted}  throttled: ${throttled}  doom_looped: ${doomLooped}  expired: ${expired}  failed: ${triagedFailed}`);
       log(`  paused: ${paused}  draining: ${draining}`);
       log(`  queue: incoming=${status.queue.incoming} triaged=${status.queue.triaged} in_progress=${status.queue.in_progress}`);
     } else {
-      log(`tick ${tickN}: triaged=${triaged}${routed > 0 ? ` (routed:${routed})` : ''} swept=${swept} promoted=${promoted}${throttled > 0 ? ` throttled=${throttled}` : ''} expired=${expired} controls=${controlsProcessed}${paused ? ' [paused]' : ''}${draining ? ' [draining]' : ''}`);
+      log(`tick ${tickN}: triaged=${triaged}${routed > 0 ? ` (routed:${routed})` : ''} swept=${swept} promoted=${promoted}${throttled > 0 ? ` throttled=${throttled}` : ''}${doomLooped > 0 ? ` doom_looped=${doomLooped}` : ''} expired=${expired} controls=${controlsProcessed}${paused ? ' [paused]' : ''}${draining ? ' [draining]' : ''}`);
     }
   } finally {
     lockRelease();
