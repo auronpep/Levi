@@ -217,6 +217,43 @@ josh heartbeat <id> [--as <actor>]
 
 Resets `meta.claim.at` to now (extending TTL by another full `claim.ttl_sec`) and appends both a history entry and a `kind: heartbeat` line to `events.ndjson`. Allowed source states: `claimed`, `planning`, `awaiting_approval`, `in_progress`. Anywhere else returns exit **1**.
 
+## Verdict matrix (Phase 4)
+
+When a todo carries `verdict_mode: matrix` (or `risk: high`), `josh tick` orchestrates a multi-specialist verdict cycle without invoking models itself — runtimes write verdict envelopes to disk; `josh` does file-contract orchestration.
+
+### Envelope shape (per spec §6.4)
+
+```
+~/.josh/todo/<id>/verdicts/<agent>.json
+```
+
+Required fields: `schema:1`, `id` (ULID), `todo_id`, `agent_id`, `agent_version`, `brief_hash` (sha256), `produced_at`, `payload {claim_text, status (approve|hold|rewrite|reject), evidence_basis, risk_if_accepted, risk_if_rejected, verification_required, human_review_needed, blockers, trust_dimensions}`, `confidence` ∈ [0,1], `cost`. Optional: `sentinel` (`auto_accept` / `requires_e08`), `sig` (Phase 6).
+
+### CLI
+
+```
+josh verdict submit <todo-id> --envelope <path>
+josh verdict list <todo-id>
+josh verdict show <todo-id> [<agent-id>|winner]
+josh matrix status [--todo <id>]
+josh matrix pending
+```
+
+### Lifecycle (driven by `josh tick`)
+
+1. **Candidate selection** (`bin/josh/lib/matrix-router.js`) reads `~/.josh/orchestrator/routing.json` → `matrix_rules`. Applies `cost-math` ceiling pruning (`MAX_TOKENS_PER_VERDICT = 50000`).
+2. **Submission**: each candidate's runtime writes `verdicts/<agent>.json` (validated by `bin/josh/lib/verdict-envelope.js`).
+3. **Auto-accept fast path**: any envelope with `sentinel: auto_accept` AND `confidence ≥ 0.9` AND `todo.risk ≠ high` → tick materializes that envelope as the winner; matrix dispatch is skipped. Reported as `matrix_auto_accepted=N` in tick output.
+4. **Adjudication**: when N envelopes are present, tick writes `~/.josh/E08/incoming/adj-<ulid>.json` with candidate envelope paths + per-agent trust scores. E08 is the **designated evaluator, never voting** (spec §8.3).
+5. **Winner picking**: E08's session writes `~/.josh/todo/<id>/verdicts/winner.json` with `{winner_id, synthesis_notes, confidence}`. Tick detects the file, copies winner envelope, archives runners-up to `verdicts/dissent/<agent>.md`, and updates `agents/<id>/trust.json` for every candidate.
+6. **Trigger tokens** (spec §8.5): specialists may end output with `⚠️ JOSH_VERDICT_REQUIRES_E08` (force matrix even at high confidence) or `✅ JOSH_VERDICT_AUTO_ACCEPT` (qualify for fast path).
+
+### Calibration
+
+`~/.josh/agents/<id>/gold/*.json` — gold items shape `{schema:1, id, todo_minimal, expected_verdict {status, claim_text}, rubric}`. Use `bin/josh/lib/gold-set.js` `replayGold()` to score candidate briefs (`{pass, fail, regression_count}`).
+
+`~/.josh/agents/<id>/trust.json` — rolling per-dimension agreement rate, updated every matrix run. Used by Phase 7 spec-evolver as a degradation signal.
+
 ## Operations: hybrid scheduler
 
 The orchestrator runs as **two cooperating schedulers**:

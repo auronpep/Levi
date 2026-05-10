@@ -709,6 +709,159 @@ function promoteApproved() {
   return { promoted, throttled };
 }
 
+// Phase 4: scan in_progress todos for matrix lifecycle work.
+//   - For each todo with verdicts/<agent>.json files matching meta.matrix_candidates count,
+//     if winner.json absent and not yet queued for adjudication, enqueueAdjudication().
+//   - For each todo whose winner.json was just written (history lacks 'winner_materialized'),
+//     materializeWinner() + updateTrust() per candidate + history mark.
+//   - Auto-accept fast-path: if any envelope qualifies, materialize that agent as winner directly.
+function sweepMatrix() {
+  let queued = 0;
+  let winners_materialized = 0;
+  let auto_accepted = 0;
+  const { listVerdicts, readEnvelope } = require('./lib/verdict-envelope');
+  const { enqueueAdjudication, materializeWinner } = require('./lib/adjudicator');
+  const { applyAutoAccept } = require('./lib/trigger-tokens');
+  const { updateTrust } = require('./lib/trust');
+
+  const inProgressDir = path.join(JOSH_ROOT, 'todo', 'in_progress');
+  let entries = [];
+  try { entries = fs.readdirSync(inProgressDir, { withFileTypes: true }); }
+  catch (e) { return { queued, winners_materialized, auto_accepted }; }
+
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const todoId = e.name;
+    const folder = path.join(inProgressDir, todoId);
+    const metaPath = path.join(folder, 'meta.json');
+    const todo = readJson(metaPath);
+    if (!todo) continue;
+    const winnerFile = path.join(folder, 'verdicts', 'winner.json');
+    const candidates = todo.matrix_candidates || [];
+
+    // Step A: winner present but not yet materialized?
+    if (fs.existsSync(winnerFile)) {
+      const alreadyMaterialized = (todo.history || []).some((h) => h.event === 'winner_materialized');
+      if (!alreadyMaterialized) {
+        try {
+          const w = JSON.parse(fs.readFileSync(winnerFile, 'utf8'));
+          // winner.json may be the wrapper (Phase 4 shape) or a raw winnerJson from E08; handle both.
+          const winnerJson = w.envelope ? { schema: 1, winner_id: w.winner_id, synthesis_notes: w.synthesis_notes, confidence: w.adjudicator_confidence }
+                                        : w;
+          // Only call materializeWinner if it hasn't already been (heuristic: dissent dir empty).
+          const dissentDir = path.join(folder, 'verdicts', 'dissent');
+          if (!fs.existsSync(dissentDir)) {
+            materializeWinner(JOSH_ROOT, todoId, winnerJson);
+          }
+          // Trust update for every candidate.
+          for (const agentId of candidates) {
+            try {
+              const env = readEnvelope(JOSH_ROOT, todoId, agentId);
+              const dims = (env.payload && env.payload.trust_dimensions) || [];
+              const agreed = (agentId === winnerJson.winner_id) ? dims : [];
+              updateTrust(JOSH_ROOT, agentId, dims, agreed);
+            } catch (err) { /* envelope missing — skip */ }
+          }
+          // Mark history.
+          todo.history = todo.history || [];
+          todo.history.push({
+            at: new Date().toISOString(),
+            actor: 'orchestrator',
+            event: 'winner_materialized',
+            details: { winner: winnerJson.winner_id },
+          });
+          writeJsonAtomic(metaPath, todo);
+          appendAudit({
+            actor: 'orchestrator',
+            action: 'matrix.winner_picked',
+            id: todoId,
+            details: { winner: winnerJson.winner_id, candidates },
+          });
+          winners_materialized++;
+        } catch (err) {
+          err && err.message && process.stderr.write(`warn: matrix winner materialize for ${todoId}: ${err.message}\n`);
+        }
+      }
+      continue;
+    }
+
+    // Step B: auto-accept fast path or N envelopes → enqueue adjudication.
+    const have = listVerdicts(JOSH_ROOT, todoId);
+    if (have.length === 0) continue;
+
+    // Auto-accept: any single envelope that qualifies.
+    let autoAcceptDone = false;
+    for (const a of have) {
+      try {
+        const env = readEnvelope(JOSH_ROOT, todoId, a);
+        const r = applyAutoAccept(env, todo);
+        if (r.accept) {
+          // Synthesize a winnerJson directly.
+          const winnerJson = {
+            schema: 1,
+            winner_id: a,
+            synthesis_notes: `auto-accepted: ${r.reason}`,
+            confidence: env.confidence,
+          };
+          // Write winner.json wrapper now so the next iteration would materialize, but do it inline.
+          fs.writeFileSync(winnerFile, JSON.stringify({
+            schema: 1, winner_id: a,
+            envelope: env,
+            synthesis_notes: winnerJson.synthesis_notes,
+            adjudicator_confidence: env.confidence,
+            materialized_at: new Date().toISOString(),
+          }, null, 2));
+          materializeWinner(JOSH_ROOT, todoId, winnerJson);
+          for (const agentId of (have)) {
+            try {
+              const e2 = readEnvelope(JOSH_ROOT, todoId, agentId);
+              const dims = (e2.payload && e2.payload.trust_dimensions) || [];
+              const agreed = (agentId === a) ? dims : [];
+              updateTrust(JOSH_ROOT, agentId, dims, agreed);
+            } catch (e2err) {}
+          }
+          todo.history = todo.history || [];
+          todo.history.push({
+            at: new Date().toISOString(),
+            actor: 'orchestrator',
+            event: 'winner_materialized',
+            details: { winner: a, auto_accepted: true },
+          });
+          writeJsonAtomic(metaPath, todo);
+          appendAudit({ actor: 'orchestrator', action: 'matrix.auto_accepted', id: todoId, details: { agent: a } });
+          auto_accepted++;
+          autoAcceptDone = true;
+          break;
+        }
+      } catch (err) { /* skip */ }
+    }
+    if (autoAcceptDone) continue;
+
+    // Standard: N envelopes (default 3) ready → enqueue.
+    const N = (todo.matrix_n || candidates.length || 3);
+    if (have.length >= N) {
+      const alreadyQueued = (todo.history || []).some((h) => h.event === 'matrix_queued');
+      if (alreadyQueued) continue;
+      try {
+        const r = enqueueAdjudication(JOSH_ROOT, todoId, have.slice(0, N));
+        todo.history = todo.history || [];
+        todo.history.push({
+          at: new Date().toISOString(),
+          actor: 'orchestrator',
+          event: 'matrix_queued',
+          details: { adjudication_id: r.adjudication_id, candidates: have.slice(0, N) },
+        });
+        writeJsonAtomic(metaPath, todo);
+        appendAudit({ actor: 'orchestrator', action: 'matrix.adjudication_queued', id: todoId, details: { adj: r.adjudication_id } });
+        queued++;
+      } catch (err) {
+        process.stderr.write(`warn: enqueueAdjudication for ${todoId}: ${err.message}\n`);
+      }
+    }
+  }
+  return { queued, winners_materialized, auto_accepted };
+}
+
 function processControlOne(file) {
   const ctrl = readJson(file.path);
   // Always remove the file, even on parse error.
@@ -1228,6 +1381,15 @@ function cmdTick(args) {
       }
     }
 
+    // 5d. Phase 4: verdict-matrix lifecycle
+    let matrixQueued = 0, matrixWinners = 0, matrixAutoAccepted = 0;
+    if (!paused) {
+      const r = sweepMatrix();
+      matrixQueued = r.queued;
+      matrixWinners = r.winners_materialized;
+      matrixAutoAccepted = r.auto_accepted;
+    }
+
     // 6. Auto-resolve expired approvals (default decision applied)
     expired = expireApprovals();
 
@@ -1260,6 +1422,9 @@ function cmdTick(args) {
         promoted,
         throttled,
         doom_looped: doomLooped,
+        matrix_queued: matrixQueued,
+        matrix_winners: matrixWinners,
+        matrix_auto_accepted: matrixAutoAccepted,
         expired_approvals: expired,
         paused,
         draining,
@@ -1275,7 +1440,7 @@ function cmdTick(args) {
       log(`  paused: ${paused}  draining: ${draining}`);
       log(`  queue: incoming=${status.queue.incoming} triaged=${status.queue.triaged} in_progress=${status.queue.in_progress}`);
     } else {
-      log(`tick ${tickN}: triaged=${triaged}${routed > 0 ? ` (routed:${routed})` : ''} swept=${swept} promoted=${promoted}${throttled > 0 ? ` throttled=${throttled}` : ''}${doomLooped > 0 ? ` doom_looped=${doomLooped}` : ''} expired=${expired} controls=${controlsProcessed}${paused ? ' [paused]' : ''}${draining ? ' [draining]' : ''}`);
+      log(`tick ${tickN}: triaged=${triaged}${routed > 0 ? ` (routed:${routed})` : ''} swept=${swept} promoted=${promoted}${throttled > 0 ? ` throttled=${throttled}` : ''}${doomLooped > 0 ? ` doom_looped=${doomLooped}` : ''}${matrixQueued > 0 ? ` matrix_queued=${matrixQueued}` : ''}${matrixWinners > 0 ? ` matrix_winners=${matrixWinners}` : ''}${matrixAutoAccepted > 0 ? ` matrix_auto_accepted=${matrixAutoAccepted}` : ''} expired=${expired} controls=${controlsProcessed}${paused ? ' [paused]' : ''}${draining ? ' [draining]' : ''}`);
     }
   } finally {
     lockRelease();
@@ -3212,6 +3377,189 @@ function cmdPlanReject(args) {
   return 0;
 }
 
+// ─── Phase 4: verdict matrix ─────────────────────────────────────────────────
+
+function cmdVerdict(args) {
+  const sub = args[0];
+  const rest = args.slice(1);
+  if (!sub || sub === 'help' || sub === '--help' || sub === '-h') {
+    log(`Usage: josh verdict <subcommand>
+
+Subcommands:
+  submit <todo-id> --envelope <path>    Validate + write a verdict envelope
+  list <todo-id>                        List per-agent verdicts on a todo
+  show <todo-id> [<agent-id>|winner]    Print a verdict envelope (or winner.json)`);
+    return 0;
+  }
+  switch (sub) {
+    case 'submit': return cmdVerdictSubmit(rest);
+    case 'list':   return cmdVerdictList(rest);
+    case 'show':   return cmdVerdictShow(rest);
+    default:
+      err(`unknown verdict subcommand: ${sub}`);
+      return 1;
+  }
+}
+
+function cmdVerdictSubmit(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        envelope: { type: 'string' },
+        as:       { type: 'string' },
+        actor:    { type: 'string' },
+      },
+      allowPositionals: true,
+      strict: true,
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const todoId = parsed.positionals[0];
+  if (!todoId) return errExit('verdict submit requires <todo-id>', 1);
+  const envPath = parsed.values.envelope;
+  if (!envPath) return errExit('verdict submit requires --envelope <path>', 1);
+  if (!fs.existsSync(envPath)) return errExit(`envelope not found: ${envPath}`, 2);
+
+  const { writeEnvelope, validateEnvelope, listVerdicts } = require('./lib/verdict-envelope');
+  let envelope;
+  try { envelope = JSON.parse(fs.readFileSync(envPath, 'utf8')); }
+  catch (e) { return errExit(`malformed envelope: ${e.message}`, 1); }
+  const v = validateEnvelope(envelope);
+  if (!v.ok) {
+    err('envelope validation failed:');
+    for (const m of v.errors) err(`  - ${m}`);
+    return 1;
+  }
+  if (envelope.todo_id !== todoId) {
+    return errExit(`envelope todo_id (${envelope.todo_id}) does not match argument (${todoId})`, 1);
+  }
+
+  let written;
+  try { written = writeEnvelope(JOSH_ROOT, todoId, envelope); }
+  catch (e) { return errExit(e.message, 4); }
+
+  appendAudit({ actor: resolveActor(parsed.values), action: 'verdict.submitted', id: envelope.id, details: { todo_id: todoId, agent_id: envelope.agent_id, status: envelope.payload.status } });
+  log(`verdict submitted: ${envelope.agent_id} → ${path.relative(JOSH_ROOT, written).replace(/\\/g, '/')}`);
+
+  const all = listVerdicts(JOSH_ROOT, todoId);
+  log(`  envelopes on ${todoId}: ${all.length} (${all.join(', ')})`);
+  return 0;
+}
+
+function cmdVerdictList(args) {
+  const todoId = args[0];
+  if (!todoId) return errExit('verdict list requires <todo-id>', 1);
+  const { listVerdicts, readEnvelope, findTodoFolder } = require('./lib/verdict-envelope');
+  if (!findTodoFolder(JOSH_ROOT, todoId)) return errExit(`todo ${todoId} not found`, 2);
+  const ids = listVerdicts(JOSH_ROOT, todoId);
+  if (ids.length === 0) { log('(no verdicts)'); return 0; }
+  for (const a of ids.sort()) {
+    try {
+      const env = readEnvelope(JOSH_ROOT, todoId, a);
+      log(`  ${a.padEnd(6)} ${env.payload.status.padEnd(8)} conf=${env.confidence.toFixed(2)}  ${env.produced_at}`);
+    } catch (e) {
+      log(`  ${a.padEnd(6)} <unreadable>`);
+    }
+  }
+  // Winner present?
+  const folder = findTodoFolder(JOSH_ROOT, todoId);
+  const winnerPath = path.join(folder, 'verdicts', 'winner.json');
+  if (fs.existsSync(winnerPath)) {
+    try {
+      const w = JSON.parse(fs.readFileSync(winnerPath, 'utf8'));
+      log(`  winner: ${w.winner_id}  (adjudicator confidence: ${w.adjudicator_confidence})`);
+    } catch (e) {}
+  }
+  return 0;
+}
+
+function cmdVerdictShow(args) {
+  const todoId = args[0];
+  const which  = args[1] || 'winner';
+  if (!todoId) return errExit('verdict show requires <todo-id> [<agent-id>|winner]', 1);
+  const { findTodoFolder, readEnvelope } = require('./lib/verdict-envelope');
+  const folder = findTodoFolder(JOSH_ROOT, todoId);
+  if (!folder) return errExit(`todo ${todoId} not found`, 2);
+  if (which === 'winner') {
+    const p = path.join(folder, 'verdicts', 'winner.json');
+    if (!fs.existsSync(p)) return errExit('no winner yet', 2);
+    log(fs.readFileSync(p, 'utf8'));
+    return 0;
+  }
+  try {
+    log(JSON.stringify(readEnvelope(JOSH_ROOT, todoId, which), null, 2));
+  } catch (e) { return errExit(e.message, 2); }
+  return 0;
+}
+
+function cmdMatrix(args) {
+  const sub = args[0];
+  const rest = args.slice(1);
+  if (!sub || sub === 'help' || sub === '--help' || sub === '-h') {
+    log(`Usage: josh matrix <subcommand>
+
+Subcommands:
+  status [--todo <id>]                  Show matrix progress (per-todo if --todo)
+  pending                               List queued E08 adjudications`);
+    return 0;
+  }
+  switch (sub) {
+    case 'status':  return cmdMatrixStatus(rest);
+    case 'pending': return cmdMatrixPending(rest);
+    default:
+      err(`unknown matrix subcommand: ${sub}`);
+      return 1;
+  }
+}
+
+function cmdMatrixStatus(args) {
+  let parsed;
+  try { parsed = parseArgs({ args, options: { todo: { type: 'string' } }, allowPositionals: true, strict: true }); }
+  catch (e) { return errExit(e.message, 1); }
+  const { listVerdicts, findTodoFolder } = require('./lib/verdict-envelope');
+  const todoIds = parsed.values.todo
+    ? [parsed.values.todo]
+    : listInProgressIdsWithVerdicts();
+  if (todoIds.length === 0) { log('(no in-flight matrices)'); return 0; }
+  for (const tid of todoIds) {
+    const folder = findTodoFolder(JOSH_ROOT, tid);
+    if (!folder) continue;
+    const meta = readJson(path.join(folder, 'meta.json')) || {};
+    const cands = (meta.matrix_candidates || []).slice();
+    const envelopes = listVerdicts(JOSH_ROOT, tid);
+    const winnerPath = path.join(folder, 'verdicts', 'winner.json');
+    const winner = fs.existsSync(winnerPath) ? '✓' : '—';
+    const display = meta.display_id || tid;
+    log(`  ${display}  cands=${cands.join(',') || '(unset)'}  envelopes=${envelopes.length}/${cands.length || '?'}  winner=${winner}`);
+  }
+  return 0;
+}
+
+function listInProgressIdsWithVerdicts() {
+  const out = [];
+  const dir = path.join(JOSH_ROOT, 'todo', 'in_progress');
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return out; }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const v = path.join(dir, e.name, 'verdicts');
+    if (fs.existsSync(v)) out.push(e.name);
+  }
+  return out;
+}
+
+function cmdMatrixPending() {
+  const { listPendingAdjudications } = require('./lib/adjudicator');
+  const list = listPendingAdjudications(JOSH_ROOT);
+  if (list.length === 0) { log('(no pending adjudications)'); return 0; }
+  for (const a of list) {
+    log(`  ${a.id}  todo=${a.todo_id}  candidates=${a.candidate_count}  queued=${a.queued_at}`);
+  }
+  return 0;
+}
+
 function cmdHelp() {
   log(`josh — CLI for the ~/.josh/ shared agent runtime`);
   log(``);
@@ -3342,6 +3690,8 @@ const COMMANDS = {
   validate: cmdValidate,
   project: cmdProject,
   plan: cmdPlan,
+  verdict: cmdVerdict,
+  matrix: cmdMatrix,
   lock: cmdLock,
   help: cmdHelp,
   '--help': cmdHelp,
