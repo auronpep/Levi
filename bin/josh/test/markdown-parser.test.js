@@ -83,3 +83,25 @@ test('parseDispatchBlock: returns null for missing dispatch section', () => {
   const result = parseDispatchBlock('# Some doc with no dispatch section');
   assert.equal(result, null);
 });
+
+const { parseAgentHeading } = require('../lib/markdown-parser');
+
+test('parseAgentHeading: extracts id and role group', () => {
+  const result = parseAgentHeading('# Agent A03 - Claims, Compliance, And Source Safety\n\nStatus: READY');
+  assert.equal(result.id, 'A03');
+  assert.equal(result.title, 'Claims, Compliance, And Source Safety');
+  assert.equal(result.role_group, 'claims_compliance_and_source_safety');
+  assert.equal(result.status, 'READY');
+});
+
+test('parseAgentHeading: A01 with multi-word title', () => {
+  const result = parseAgentHeading('# Agent A01 - Command Center And Integration\n\nStatus: READY');
+  assert.equal(result.id, 'A01');
+  assert.equal(result.title, 'Command Center And Integration');
+  assert.equal(result.role_group, 'command_center_and_integration');
+});
+
+test('parseAgentHeading: unknown id returns null', () => {
+  const result = parseAgentHeading('# Some other heading');
+  assert.equal(result, null);
+});

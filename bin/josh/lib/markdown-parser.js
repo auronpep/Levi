@@ -94,4 +94,18 @@ function parseDispatchBlock(text) {
   };
 }
 
-module.exports = { extractFrontmatter, parseRequiredOrder, parseDispatchBlock };
+function parseAgentHeading(text) {
+  const headingMatch = text.match(/^#\s+Agent\s+([AE]\d{2})\s*-\s*(.+)$/m);
+  if (!headingMatch) return null;
+  const id = headingMatch[1];
+  const title = headingMatch[2].trim();
+  const role_group = title
+    .toLowerCase()
+    .replace(/[,]/g, '')
+    .replace(/\s+/g, '_');
+  const statusMatch = text.match(/^Status:\s+(\w+)/m);
+  const status = statusMatch ? statusMatch[1] : null;
+  return { id, title, role_group, status };
+}
+
+module.exports = { extractFrontmatter, parseRequiredOrder, parseDispatchBlock, parseAgentHeading };
