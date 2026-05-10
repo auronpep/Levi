@@ -2592,8 +2592,40 @@ function cmdProjectImport(args) {
 }
 
 function cmdProjectStatus(args) {
-  err('not yet implemented (Task 12)');
-  return 1;
+  const { renderDailyReview } = require('./lib/project-status');
+  let projectId = null;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--project') {
+      projectId = args[++i];
+    }
+  }
+  if (!projectId) {
+    const projectsDir = path.join(JOSH_ROOT, 'projects');
+    if (!fs.existsSync(projectsDir)) {
+      err('no projects imported yet');
+      return 2;
+    }
+    const ids = fs.readdirSync(projectsDir).filter((d) =>
+      fs.statSync(path.join(projectsDir, d)).isDirectory()
+    );
+    if (ids.length === 0) {
+      err('no projects imported yet');
+      return 2;
+    }
+    if (ids.length > 1) {
+      err(`multiple projects exist; specify one with --project <id>`);
+      err(`available: ${ids.join(', ')}`);
+      return 1;
+    }
+    projectId = ids[0];
+  }
+  try {
+    log(renderDailyReview(projectId, { joshRoot: JOSH_ROOT }));
+    return 0;
+  } catch (e) {
+    err(e.message);
+    return 2;
+  }
 }
 
 function cmdProjectSync(args) {
