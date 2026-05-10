@@ -1373,6 +1373,15 @@ function cmdClaim(args) {
     if (todo.primary_role !== agentId) {
       return errExit(`todo primary_role is '${todo.primary_role || '<unset>'}', expected '${agentId}'`, 1);
     }
+    // Phase 3: hard-dep enforcement.
+    {
+      const { checkDependencies } = require('./lib/dependency-checker');
+      const dep = checkDependencies(JOSH_ROOT, todo);
+      if (!dep.ok) {
+        const list = dep.blocked_by.map((b) => `${b.display_id}(${b.state})`).join(', ');
+        return errExit(`dependencies not yet done: ${list}`, 3);
+      }
+    }
     // Load brief (asserts manifest + source exist).
     let brief;
     try {
@@ -1412,6 +1421,20 @@ function cmdClaim(args) {
   }
 
   // Backward-compatible path: triaged → in_progress (no --agent).
+  // Phase 3: hard-dep enforcement also applies here.
+  {
+    const located = locateTodo(idArg, ['triaged']);
+    if (located.error) return errExit(located.error, located.code);
+    const todo = readJson(located.path);
+    if (!todo) return errExit(`malformed todo at ${located.relative}`, 4);
+    const { checkDependencies } = require('./lib/dependency-checker');
+    const dep = checkDependencies(JOSH_ROOT, todo);
+    if (!dep.ok) {
+      const list = dep.blocked_by.map((b) => `${b.display_id}(${b.state})`).join(', ');
+      return errExit(`dependencies not yet done: ${list}`, 3);
+    }
+  }
+
   const r = transitionTodo({
     srcStates: ['triaged'],
     dst: 'in_progress',

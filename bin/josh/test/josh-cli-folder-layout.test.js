@@ -342,3 +342,78 @@ test('lifecycle events: fail writes a failed event with reason', () => {
   assert.equal(failed[0].reason, 'broken', 'failed event should carry the reason');
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+test('cli: claim refuses when hard dep is not done', () => {
+  const root = setupRoot();
+
+  // Seed agent A01 manifest (so --agent path works).
+  const agentDir = path.join(root, 'agents', 'A01');
+  fs.mkdirSync(agentDir, { recursive: true });
+  const briefPath = path.join(agentDir, 'brief.md');
+  fs.writeFileSync(briefPath, '# Agent A01\n');
+  fs.writeFileSync(path.join(agentDir, 'manifest.json'), JSON.stringify({
+    schema: 1, id: 'A01', source_path: briefPath,
+  }, null, 2));
+
+  function seedTriaged(id, meta) {
+    const dir = path.join(root, 'todo', 'triaged', id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify({
+      schema: 1, id, primary_role: 'A01', history: [], ...meta,
+    }, null, 2));
+    fs.writeFileSync(path.join(dir, 'state'), 'triaged\n');
+    fs.writeFileSync(path.join(dir, 'events.ndjson'), '');
+  }
+  seedTriaged('01DEP002', { display_id: 'D1-002', depends_on: [], depends_on_display_ids: [] });
+  seedTriaged('01DEP003', {
+    display_id: 'D1-003',
+    depends_on: [{ id: '01DEP002', kind: 'hard' }],
+    depends_on_display_ids: ['D1-002'],
+  });
+
+  let exitCode = 0; let stderrOut = '';
+  try {
+    execSync(`node "${JOSH_BIN}" claim 01DEP003 --agent A01 --as A01`, {
+      env: { ...process.env, JOSH_ROOT: root }, stdio: 'pipe',
+    });
+  } catch (e) { exitCode = e.status; stderrOut = e.stderr.toString(); }
+  assert.equal(exitCode, 3, `expected exit 3, got ${exitCode}; stderr: ${stderrOut}`);
+  assert.match(stderrOut, /D1-002/);
+  assert.match(stderrOut, /dependencies/i);
+
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('cli: claim succeeds once hard dep is done', () => {
+  const root = setupRoot();
+
+  const agentDir = path.join(root, 'agents', 'A01');
+  fs.mkdirSync(agentDir, { recursive: true });
+  const briefPath = path.join(agentDir, 'brief.md');
+  fs.writeFileSync(briefPath, '# Agent A01\n');
+  fs.writeFileSync(path.join(agentDir, 'manifest.json'), JSON.stringify({
+    schema: 1, id: 'A01', source_path: briefPath,
+  }, null, 2));
+
+  function seed(state, id, meta) {
+    const dir = path.join(root, 'todo', state, id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify({
+      schema: 1, id, primary_role: 'A01', history: [], ...meta,
+    }, null, 2));
+    fs.writeFileSync(path.join(dir, 'state'), state + '\n');
+    fs.writeFileSync(path.join(dir, 'events.ndjson'), '');
+  }
+  seed('done',    '01DEP002', { display_id: 'D1-002' });
+  seed('triaged', '01DEP003', {
+    display_id: 'D1-003',
+    depends_on: [{ id: '01DEP002', kind: 'hard' }],
+    depends_on_display_ids: ['D1-002'],
+  });
+
+  const out = runCli('claim 01DEP003 --agent A01 --as A01', { JOSH_ROOT: root });
+  assert.match(out, /01DEP003/);
+  assert.equal(fs.existsSync(path.join(root, 'todo', 'claimed', '01DEP003', 'meta.json')), true);
+
+  fs.rmSync(root, { recursive: true, force: true });
+});
