@@ -294,6 +294,39 @@ test('lifecycle events: complete writes a done event into done folder', () => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
+// ─── Fix I3: transitionTodo rollback on post-rename failure ─────────────────
+
+test('transitionTodo: rolls back rename when meta.json is malformed', () => {
+  const root = setupRoot();
+  // Push + tick so a real folder exists in triaged/ with sibling files.
+  const out = runCli('push todo "rollback-target"', { JOSH_ROOT: root });
+  const id = out.trim().split('\n').filter(Boolean).pop().trim();
+  runCli('tick', { JOSH_ROOT: root });
+  const fromDir = path.join(root, 'todo', 'triaged', id);
+  assert.equal(fs.existsSync(path.join(fromDir, 'meta.json')), true, 'precondition: triaged folder exists');
+
+  // Corrupt meta.json so the post-rename readJson returns null.
+  fs.writeFileSync(path.join(fromDir, 'meta.json'), '{ this is : not json }', 'utf8');
+
+  // claim should fail with code 4 (malformed meta).
+  let err = null;
+  try {
+    runCli(`claim ${id} --as worker`, { JOSH_ROOT: root });
+  } catch (e) {
+    err = e;
+  }
+  assert.ok(err, 'expected claim to fail with malformed meta.json');
+  assert.equal(err.status, 4, `expected exit code 4, got ${err.status}`);
+
+  // Rollback: folder must be back at triaged, not stranded in in_progress.
+  assert.equal(fs.existsSync(fromDir), true,
+    'expected folder rolled back to triaged/');
+  assert.equal(fs.existsSync(path.join(root, 'todo', 'in_progress', id)), false,
+    'folder must NOT be stranded in in_progress/ after rollback');
+
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
 test('lifecycle events: fail writes a failed event with reason', () => {
   const root = setupRoot();
   const out = runCli('push todo "events-fail"', { JOSH_ROOT: root });

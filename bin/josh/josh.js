@@ -385,16 +385,35 @@ function transitionTodo({ src, dst, srcStates, idOrSuffix, actor, eventName, eve
   }
 
   // We own the folder at toDir. Read meta, mutate, write.
+  // If anything in this block fails (malformed meta, update() throws, write fails),
+  // best-effort rename the folder back to fromDir so the state machine isn't
+  // left with a todo physically in dst/ but no audit/event record of the move.
   const metaPath = path.join(toDir, 'meta.json');
-  const todo = readJson(metaPath);
-  if (!todo) return { code: 4, error: `malformed meta.json at ${dst}/${located.id}` };
-  todo.history = todo.history || [];
-  const now = new Date().toISOString();
-  todo.history.push({ at: now, actor, event: eventName, details: eventDetails || {} });
-  if (typeof update === 'function') update(todo, now);
-  writeJsonAtomic(metaPath, todo);
-  // Sync the one-line state file.
-  try { fs.writeFileSync(path.join(toDir, 'state'), dst + '\n', 'utf8'); } catch (e) { /* non-fatal */ }
+  let todo;
+  try {
+    todo = readJson(metaPath);
+    if (!todo) {
+      const e = new Error(`malformed meta.json at ${dst}/${located.id}`);
+      e.code = 4;
+      throw e;
+    }
+    todo.history = todo.history || [];
+    const now = new Date().toISOString();
+    todo.history.push({ at: now, actor, event: eventName, details: eventDetails || {} });
+    if (typeof update === 'function') update(todo, now);
+    writeJsonAtomic(metaPath, todo);
+    // Sync the one-line state file.
+    try { fs.writeFileSync(path.join(toDir, 'state'), dst + '\n', 'utf8'); } catch (e) { /* non-fatal */ }
+  } catch (e) {
+    // Rollback: undo the rename so the todo isn't stranded in dst/.
+    let rollbackErr = null;
+    try { fs.renameSync(toDir, fromDir); } catch (re) { rollbackErr = re; }
+    const msg = e && e.message ? e.message : String(e);
+    if (rollbackErr) {
+      err(`transitionTodo rollback also failed for ${located.id}: ${rollbackErr.message}`);
+    }
+    return { code: (e && e.code === 4) ? 4 : 4, error: msg };
+  }
 
   // Lifecycle event: every transition emits a "start" event in the new state's folder.
   // Best-effort — never fail the transition over a missing event line.
