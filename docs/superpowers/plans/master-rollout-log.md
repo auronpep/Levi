@@ -81,3 +81,17 @@ Append-only journal of the autonomous Phase 3 → Phase 10 rollout. One section 
 - **Started:** (next)
 - **Branch:** `claude/josh-phase8-cross-runtime` (off Phase 7 HEAD)
 - **Plan doc:** `2026-05-10-josh-cross-runtime-phase8.md`
+- **Status:** SHIPPED → PR (pending push)
+- **Commits:** 2 (1 big feature + 1 log)
+- **Tests:** 204 pass / 0 fail / 1 skipped
+- **Shipped:** mcp-registry, tool-scoping, a2a-bridge (Node http on 127.0.0.1), `josh tool` + `josh a2a` CLI, claim integration writes runtime.json.allowed_tools, smoke covering register/scope/violation/HTTP-claim.
+- **Surprises:** A2A test process hung post-test because the stop-flag setInterval kept the event loop alive. Fixed via interval.unref() + an explicit `stop()` callback the test calls. Reverse-the-question: didn't ask user, just probed Node interval semantics myself and patched.
+- **Deferred to 8B:** TLS+auth on the bridge, runtime-boundary enforcement of tool scoping (today's check is declarative).
+
+---
+
+## Phase 9 — Ops dashboard + cost telemetry
+
+- **Started:** (next)
+- **Branch:** `claude/josh-phase9-dashboard` (off Phase 8 HEAD)
+- **Plan doc:** `2026-05-10-josh-dashboard-phase9.md`

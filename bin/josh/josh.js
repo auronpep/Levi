@@ -1634,6 +1634,7 @@ function cmdClaim(args) {
     if (r.error) return errExit(r.error, r.code);
     // After move, write runtime.json next to meta.json.
     const claimedFolder = path.join(JOSH_ROOT, 'todo', 'claimed', r.id);
+    const { resolveAllowedTools } = require('./lib/tool-scoping');
     const runtime = {
       schema: 1,
       harness: process.env.JOSH_HARNESS || 'unknown',
@@ -1642,6 +1643,7 @@ function cmdClaim(args) {
       actor,
       started_at: new Date().toISOString(),
       speculative_n: speculativeN || 1,
+      allowed_tools: resolveAllowedTools(JOSH_ROOT, agentId),
     };
     // Phase 5: --speculative N forks N worktrees of meta.context.repo.
     if (speculativeN) {
@@ -3913,6 +3915,219 @@ function cmdLessonList(args) {
   return 0;
 }
 
+// ─── Phase 8: cross-runtime gateway ──────────────────────────────────────────
+
+function cmdTool(args) {
+  const sub = args[0];
+  const rest = args.slice(1);
+  if (!sub || sub === 'help' || sub === '--help' || sub === '-h') {
+    log(`Usage: josh tool <subcommand>
+
+Subcommands:
+  register --id <id> [--command <c>] [--args <a,b>] [--cap <x,y>]
+  unregister --id <id>
+  list
+  show <id>
+  scope-add <agent-id> <tool-id>
+  scope-remove <agent-id> <tool-id>
+  scope-show <agent-id>
+  violation log --todo <id> --agent <id> --tool <id> [--reason "..."]`);
+    return 0;
+  }
+  switch (sub) {
+    case 'register':     return cmdToolRegister(rest);
+    case 'unregister':   return cmdToolUnregister(rest);
+    case 'list':         return cmdToolList(rest);
+    case 'show':         return cmdToolShow(rest);
+    case 'scope-add':    return cmdToolScopeAdd(rest);
+    case 'scope-remove': return cmdToolScopeRemove(rest);
+    case 'scope-show':   return cmdToolScopeShow(rest);
+    case 'violation':    return cmdToolViolation(rest);
+    default: err(`unknown tool subcommand: ${sub}`); return 1;
+  }
+}
+
+function cmdToolRegister(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        id: { type: 'string' },
+        command: { type: 'string' },
+        args: { type: 'string' },
+        cap: { type: 'string' },
+        env: { type: 'string' },
+      },
+      allowPositionals: false, strict: true,
+    });
+  } catch (e) { return errExit(e.message, 1); }
+  if (!parsed.values.id) return errExit('--id required', 1);
+  const { registerServer } = require('./lib/mcp-registry');
+  const r = registerServer(JOSH_ROOT, {
+    id: parsed.values.id,
+    command: parsed.values.command || null,
+    args: parsed.values.args ? parsed.values.args.split(',') : [],
+    capabilities: parsed.values.cap ? parsed.values.cap.split(',') : [],
+  });
+  log(`registered tool: ${r.id}`);
+  appendAudit({ actor: defaultActor(), action: 'tool.registered', id: r.id, details: { capabilities: r.capabilities } });
+  return 0;
+}
+
+function cmdToolUnregister(args) {
+  let parsed;
+  try { parsed = parseArgs({ args, options: { id: { type: 'string' } }, allowPositionals: false, strict: true }); }
+  catch (e) { return errExit(e.message, 1); }
+  if (!parsed.values.id) return errExit('--id required', 1);
+  const { unregisterServer } = require('./lib/mcp-registry');
+  const r = unregisterServer(JOSH_ROOT, parsed.values.id);
+  log(`unregistered ${r.removed} tool(s) named ${parsed.values.id}`);
+  return 0;
+}
+
+function cmdToolList() {
+  const { listServers } = require('./lib/mcp-registry');
+  const list = listServers(JOSH_ROOT);
+  if (list.length === 0) { log('(no MCP tools registered)'); return 0; }
+  for (const s of list) {
+    log(`  ${s.id.padEnd(20)} caps=${(s.capabilities || []).join(',')}`);
+  }
+  return 0;
+}
+
+function cmdToolShow(args) {
+  const id = args[0];
+  if (!id) return errExit('tool show requires <id>', 1);
+  const { getServer } = require('./lib/mcp-registry');
+  const s = getServer(JOSH_ROOT, id);
+  if (!s) return errExit(`tool ${id} not found`, 2);
+  log(JSON.stringify(s, null, 2));
+  return 0;
+}
+
+function cmdToolScopeAdd(args) {
+  const [agentId, toolId] = args;
+  if (!agentId || !toolId) return errExit('scope-add requires <agent-id> <tool-id>', 1);
+  const { addAllowedTool } = require('./lib/tool-scoping');
+  try {
+    const list = addAllowedTool(JOSH_ROOT, agentId, toolId);
+    log(`agent ${agentId} allowed_tools: ${JSON.stringify(list)}`);
+    appendAudit({ actor: defaultActor(), action: 'agent.scope_add', id: agentId, details: { tool_id: toolId } });
+    return 0;
+  } catch (e) { return errExit(e.message, 4); }
+}
+
+function cmdToolScopeRemove(args) {
+  const [agentId, toolId] = args;
+  if (!agentId || !toolId) return errExit('scope-remove requires <agent-id> <tool-id>', 1);
+  const { removeAllowedTool } = require('./lib/tool-scoping');
+  try {
+    const list = removeAllowedTool(JOSH_ROOT, agentId, toolId);
+    log(`agent ${agentId} allowed_tools: ${JSON.stringify(list)}`);
+    appendAudit({ actor: defaultActor(), action: 'agent.scope_remove', id: agentId, details: { tool_id: toolId } });
+    return 0;
+  } catch (e) { return errExit(e.message, 4); }
+}
+
+function cmdToolScopeShow(args) {
+  const agentId = args[0];
+  if (!agentId) return errExit('scope-show requires <agent-id>', 1);
+  const { resolveAllowedTools } = require('./lib/tool-scoping');
+  const list = resolveAllowedTools(JOSH_ROOT, agentId);
+  if (list === null) { log(`${agentId}: unrestricted (full tool access)`); return 0; }
+  log(`${agentId}: ${JSON.stringify(list)}`);
+  return 0;
+}
+
+function cmdToolViolation(args) {
+  const sub = args[0];
+  if (sub !== 'log') return errExit('tool violation usage: tool violation log --todo <id> --agent <id> --tool <id> [--reason "..."]', 1);
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args: args.slice(1),
+      options: { todo: { type: 'string' }, agent: { type: 'string' }, tool: { type: 'string' }, reason: { type: 'string' } },
+      allowPositionals: false, strict: true,
+    });
+  } catch (e) { return errExit(e.message, 1); }
+  if (!parsed.values.todo || !parsed.values.agent || !parsed.values.tool) {
+    return errExit('--todo, --agent, --tool all required', 1);
+  }
+  const { recordViolation, resolveAllowedTools, checkScope } = require('./lib/tool-scoping');
+  const allowed = resolveAllowedTools(JOSH_ROOT, parsed.values.agent);
+  const check = checkScope(allowed, parsed.values.tool);
+  const r = recordViolation(JOSH_ROOT, {
+    todoId: parsed.values.todo,
+    agentId: parsed.values.agent,
+    toolId: parsed.values.tool,
+    reason: parsed.values.reason || (check.allowed ? null : check.reason),
+  });
+  log(`violation logged: ${path.relative(JOSH_ROOT, r.recorded).replace(/\\/g, '/')}`);
+  appendAudit({ actor: defaultActor(), action: 'agent.tool_violation', id: parsed.values.agent, details: { tool: parsed.values.tool, todo_id: parsed.values.todo, in_scope: check.allowed } });
+  return 0;
+}
+
+function cmdA2A(args) {
+  const sub = args[0];
+  const rest = args.slice(1);
+  if (!sub || sub === 'help' || sub === '--help' || sub === '-h') {
+    log(`Usage: josh a2a <subcommand>
+
+Subcommands:
+  serve [--port N]                  Foreground HTTP server (Ctrl+C to stop)
+  stop                              Signal a running serve to exit
+  health                            Hit /healthz on default port`);
+    return 0;
+  }
+  switch (sub) {
+    case 'serve':  return cmdA2AServe(rest);
+    case 'stop':   return cmdA2AStop(rest);
+    case 'health': return cmdA2AHealth(rest);
+    default: err(`unknown a2a subcommand: ${sub}`); return 1;
+  }
+}
+
+function cmdA2AServe(args) {
+  let parsed;
+  try { parsed = parseArgs({ args, options: { port: { type: 'string' }, host: { type: 'string' } }, allowPositionals: false, strict: true }); }
+  catch (e) { return errExit(e.message, 1); }
+  const { startServer } = require('./lib/a2a-bridge');
+  const port = parsed.values.port ? parseInt(parsed.values.port, 10) : undefined;
+  const host = parsed.values.host || '127.0.0.1';
+  startServer(JOSH_ROOT, { port, host }).then(({ server, port: actualPort }) => {
+    log(`josh a2a serving on http://${host}:${actualPort}`);
+    log(`(send SIGINT or 'josh a2a stop' to exit)`);
+    process.on('SIGINT', () => { try { server.close(() => process.exit(0)); } catch (e) {} });
+  }).catch((e) => {
+    err(`a2a serve failed: ${e.message}`);
+    process.exit(4);
+  });
+  return 0;
+}
+
+function cmdA2AStop() {
+  const { requestStop } = require('./lib/a2a-bridge');
+  requestStop(JOSH_ROOT);
+  log('stop signal written; running server will exit on next poll');
+  return 0;
+}
+
+function cmdA2AHealth(args) {
+  let parsed;
+  try { parsed = parseArgs({ args, options: { port: { type: 'string' }, host: { type: 'string' } }, allowPositionals: false, strict: true }); }
+  catch (e) { return errExit(e.message, 1); }
+  const port = parsed.values.port ? parseInt(parsed.values.port, 10) : parseInt(process.env.JOSH_A2A_PORT || '7843', 10);
+  const host = parsed.values.host || '127.0.0.1';
+  const httpLib = require('http');
+  httpLib.get({ host, port, path: '/healthz' }, (res) => {
+    let body = '';
+    res.on('data', (c) => { body += c; });
+    res.on('end', () => log(body));
+  }).on('error', (e) => { err(e.message); process.exit(4); });
+  return 0;
+}
+
 // Augment cmdVerdict with `verify` subcommand.
 function cmdVerdictVerify(args) {
   const todoId = args[0];
@@ -4069,6 +4284,8 @@ const COMMANDS = {
   audit: cmdAudit,
   evolve: cmdEvolve,
   lesson: cmdLesson,
+  tool: cmdTool,
+  a2a: cmdA2A,
   lock: cmdLock,
   help: cmdHelp,
   '--help': cmdHelp,
