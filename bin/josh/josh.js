@@ -1271,7 +1271,8 @@ function cmdClaim(args) {
       options: {
         as:    { type: 'string' },
         actor: { type: 'string' },
-        ttl:   { type: 'string' }
+        ttl:   { type: 'string' },
+        agent: { type: 'string' },
       },
       allowPositionals: true,
       strict: true
@@ -1287,6 +1288,57 @@ function cmdClaim(args) {
     return errExit('--ttl must be in [1, 86400] seconds', 1);
   }
 
+  const agentId = parsed.values.agent || null;
+
+  // If --agent given, take the dispatch path (triaged → claimed) with brief injection.
+  if (agentId) {
+    // Pre-flight: locate, check primary_role.
+    const located = locateTodo(idArg, ['triaged']);
+    if (located.error) return errExit(located.error, located.code);
+    const todo = readJson(located.path);
+    if (!todo) return errExit(`malformed todo at ${located.relative}`, 4);
+    if (todo.primary_role !== agentId) {
+      return errExit(`todo primary_role is '${todo.primary_role || '<unset>'}', expected '${agentId}'`, 1);
+    }
+    // Load brief (asserts manifest + source exist).
+    let brief;
+    try {
+      const { loadBrief } = require('./lib/agent-brief');
+      brief = loadBrief(JOSH_ROOT, agentId);
+    } catch (e) {
+      return errExit(e.message, 2);
+    }
+    // Transition triaged → claimed. Stamp agent_brief_path. Write runtime.json.
+    const r = transitionTodo({
+      srcStates: ['triaged'],
+      dst: 'claimed',
+      idOrSuffix: idArg,
+      actor,
+      eventName: 'claimed',
+      eventDetails: { ttl_sec: ttlSec, agent_id: agentId },
+      update: (t, now) => {
+        t.claim = { by: actor, at: now, ttl_sec: ttlSec, agent_id: agentId };
+        t.agent_brief_path = brief.path;
+      },
+      audit: { action: 'todo.claimed', details: { ttl_sec: ttlSec, agent_id: agentId } }
+    });
+    if (r.error) return errExit(r.error, r.code);
+    // After move, write runtime.json next to meta.json.
+    const claimedFolder = path.join(JOSH_ROOT, 'todo', 'claimed', r.id);
+    const runtime = {
+      schema: 1,
+      harness: process.env.JOSH_HARNESS || 'unknown',
+      session_id: process.env.JOSH_SESSION_ID || null,
+      claimed_by: agentId,
+      actor,
+      started_at: new Date().toISOString(),
+    };
+    writeJsonAtomic(path.join(claimedFolder, 'runtime.json'), runtime);
+    log(r.id);
+    return 0;
+  }
+
+  // Backward-compatible path: triaged → in_progress (no --agent).
   const r = transitionTodo({
     srcStates: ['triaged'],
     dst: 'in_progress',
