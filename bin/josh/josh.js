@@ -3730,6 +3730,189 @@ function cmdAuditListKeys() {
   return 0;
 }
 
+// ─── Phase 7: spec-evolver + lessons ─────────────────────────────────────────
+
+function cmdEvolve(args) {
+  const sub = args[0];
+  const rest = args.slice(1);
+  if (!sub || sub === 'help' || sub === '--help' || sub === '-h') {
+    log(`Usage: josh evolve <subcommand>
+
+Subcommands:
+  start <agent-id> [--max-rounds 5] [--simulator <dir>] [--allow-any]
+  status [<evolve-id>]
+  list [--state active|pending_approval|done]
+  approve <evolve-id> [--as actor]
+  reject <evolve-id> --reason "..." [--as actor]`);
+    return 0;
+  }
+  switch (sub) {
+    case 'start':   return cmdEvolveStart(rest);
+    case 'status':  return cmdEvolveStatus(rest);
+    case 'list':    return cmdEvolveList(rest);
+    case 'approve': return cmdEvolveApprove(rest);
+    case 'reject':  return cmdEvolveReject(rest);
+    default: err(`unknown evolve subcommand: ${sub}`); return 1;
+  }
+}
+
+function cmdEvolveStart(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        'max-rounds': { type: 'string' },
+        simulator:    { type: 'string' },
+        'allow-any':  { type: 'boolean' },
+        as:           { type: 'string' },
+        actor:        { type: 'string' },
+      },
+      allowPositionals: true,
+      strict: true,
+    });
+  } catch (e) { return errExit(e.message, 1); }
+  const agentId = parsed.positionals[0];
+  if (!agentId) return errExit('evolve start requires <agent-id>', 1);
+  const { enqueueEvolution, processRound, assembleApproval } = require('./lib/spec-evolver');
+  let r;
+  try {
+    r = enqueueEvolution(JOSH_ROOT, agentId, {
+      maxRounds: parsed.values['max-rounds'] ? parseInt(parsed.values['max-rounds'], 10) : undefined,
+      allowAny: !!parsed.values['allow-any'],
+    });
+  } catch (e) { return errExit(e.message, 4); }
+  log(`evolve queued: ${r.evolve_id}`);
+  appendAudit({ actor: resolveActor(parsed.values), action: 'agent.evolve_started', id: r.evolve_id, details: { agent_id: agentId } });
+
+  const simDir = parsed.values.simulator;
+  if (simDir) {
+    if (!fs.existsSync(simDir)) return errExit(`simulator dir not found: ${simDir}`, 2);
+    const files = fs.readdirSync(simDir)
+      .filter((f) => /^round-\d+\.json$/.test(f))
+      .sort((a, b) => parseInt(a.match(/\d+/)[0], 10) - parseInt(b.match(/\d+/)[0], 10));
+    for (const f of files) {
+      const candidate = JSON.parse(fs.readFileSync(path.join(simDir, f), 'utf8'));
+      const pr = processRound(JOSH_ROOT, agentId, r.evolve_id, candidate);
+      log(`  round ${candidate.round_num}: pass=${pr.latest.pass}/${pr.latest.total}  no_new_gaps=${pr.latest.no_new_gaps_found}  halted=${pr.halted}${pr.halted ? ' (' + pr.halt_reason + ')' : ''}`);
+      if (pr.halted) {
+        const a = assembleApproval(JOSH_ROOT, agentId, r.evolve_id);
+        log(`  approval ready at: ${path.relative(JOSH_ROOT, a.approval_dir).replace(/\\/g, '/')}`);
+        break;
+      }
+    }
+  }
+  return 0;
+}
+
+function cmdEvolveStatus(args) {
+  const evId = args[0];
+  const { listEvolutions, readState } = require('./lib/spec-evolver');
+  if (!evId) {
+    const list = listEvolutions(JOSH_ROOT);
+    if (list.length === 0) { log('(no evolutions)'); return 0; }
+    for (const e of list) {
+      log(`  ${e.evolve_id}  loc=${e.location}${e.agent_id ? '  agent=' + e.agent_id : ''}${e.halted != null ? '  halted=' + e.halted : ''}${e.halt_reason ? '  reason=' + e.halt_reason : ''}`);
+    }
+    return 0;
+  }
+  const m = evId.match(/^evolve-([^-]+)-/);
+  if (!m) return errExit('malformed evolve-id', 1);
+  const agentId = m[1];
+  const state = readState(JOSH_ROOT, agentId, evId);
+  if (!state) return errExit(`evolve ${evId} not found`, 2);
+  log(JSON.stringify(state, null, 2));
+  return 0;
+}
+
+function cmdEvolveList(args) {
+  let parsed;
+  try { parsed = parseArgs({ args, options: { state: { type: 'string' } }, allowPositionals: false, strict: true }); }
+  catch (e) { return errExit(e.message, 1); }
+  const { listEvolutions } = require('./lib/spec-evolver');
+  const list = listEvolutions(JOSH_ROOT, { state: parsed.values.state });
+  if (list.length === 0) { log('(none)'); return 0; }
+  for (const e of list) {
+    log(`  ${e.evolve_id}  loc=${e.location}${e.halt_reason ? '  reason=' + e.halt_reason : ''}`);
+  }
+  return 0;
+}
+
+function cmdEvolveApprove(args) {
+  let parsed;
+  try { parsed = parseArgs({ args, options: { as: { type: 'string' }, actor: { type: 'string' } }, allowPositionals: true, strict: true }); }
+  catch (e) { return errExit(e.message, 1); }
+  const evId = parsed.positionals[0];
+  if (!evId) return errExit('evolve approve requires <evolve-id>', 1);
+  const { applyApproval } = require('./lib/spec-evolver');
+  let r;
+  try { r = applyApproval(JOSH_ROOT, evId, { actor: resolveActor(parsed.values) }); }
+  catch (e) { return errExit(e.message, 4); }
+  log(`evolved ${r.agent_id} → version ${r.new_version}`);
+  appendAudit({ actor: resolveActor(parsed.values), action: 'agent.evolved', id: evId, details: { agent_id: r.agent_id, new_version: r.new_version } });
+  return 0;
+}
+
+function cmdEvolveReject(args) {
+  let parsed;
+  try { parsed = parseArgs({ args, options: { as: { type: 'string' }, actor: { type: 'string' }, reason: { type: 'string' } }, allowPositionals: true, strict: true }); }
+  catch (e) { return errExit(e.message, 1); }
+  const evId = parsed.positionals[0];
+  if (!evId) return errExit('evolve reject requires <evolve-id>', 1);
+  const reason = parsed.values.reason;
+  if (!reason) return errExit('--reason required', 1);
+  const { archiveRejection } = require('./lib/spec-evolver');
+  try { archiveRejection(JOSH_ROOT, evId, reason, { actor: resolveActor(parsed.values) }); }
+  catch (e) { return errExit(e.message, 4); }
+  log(`evolve rejected: ${evId}`);
+  appendAudit({ actor: resolveActor(parsed.values), action: 'agent.evolve_rejected', id: evId, details: { reason } });
+  return 0;
+}
+
+function cmdLesson(args) {
+  const sub = args[0];
+  const rest = args.slice(1);
+  if (!sub || sub === 'help' || sub === '--help' || sub === '-h') {
+    log(`Usage: josh lesson <subcommand>
+
+Subcommands:
+  add <agent-id> "text" [--as actor]
+  list <agent-id>`);
+    return 0;
+  }
+  switch (sub) {
+    case 'add':  return cmdLessonAdd(rest);
+    case 'list': return cmdLessonList(rest);
+    default: err(`unknown lesson subcommand: ${sub}`); return 1;
+  }
+}
+
+function cmdLessonAdd(args) {
+  let parsed;
+  try { parsed = parseArgs({ args, options: { as: { type: 'string' }, actor: { type: 'string' } }, allowPositionals: true, strict: true }); }
+  catch (e) { return errExit(e.message, 1); }
+  const agentId = parsed.positionals[0];
+  const text = parsed.positionals.slice(1).join(' ').trim();
+  if (!agentId || !text) return errExit('lesson add requires <agent-id> "text"', 1);
+  const { appendLesson } = require('./lib/lessons');
+  appendLesson(JOSH_ROOT, agentId, text, { actor: resolveActor(parsed.values) });
+  log(`lesson appended for ${agentId}`);
+  appendAudit({ actor: resolveActor(parsed.values), action: 'agent.lesson_added', id: agentId, details: { text } });
+  return 0;
+}
+
+function cmdLessonList(args) {
+  const agentId = args[0];
+  if (!agentId) return errExit('lesson list requires <agent-id>', 1);
+  const { readLessons } = require('./lib/lessons');
+  const r = readLessons(JOSH_ROOT, agentId);
+  if (r.entries.length === 0) { log('(no lessons)'); return 0; }
+  for (const e of r.entries) {
+    log(`  [${e.at}] (${e.actor}) ${e.text}`);
+  }
+  return 0;
+}
+
 // Augment cmdVerdict with `verify` subcommand.
 function cmdVerdictVerify(args) {
   const todoId = args[0];
@@ -3884,6 +4067,8 @@ const COMMANDS = {
   matrix: cmdMatrix,
   agent: cmdAgent,
   audit: cmdAudit,
+  evolve: cmdEvolve,
+  lesson: cmdLesson,
   lock: cmdLock,
   help: cmdHelp,
   '--help': cmdHelp,

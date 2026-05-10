@@ -67,3 +67,17 @@ Append-only journal of the autonomous Phase 3 → Phase 10 rollout. One section 
 - **Started:** (next)
 - **Branch:** `claude/josh-phase7-spec-evolver` (off Phase 6 HEAD)
 - **Plan doc:** `2026-05-10-josh-spec-evolver-phase7.md`
+- **Status:** SHIPPED → PR (pending push)
+- **Commits:** 2 (1 big feature + 1 log)
+- **Tests:** 200 pass / 0 fail / 1 skipped
+- **Shipped:** archetypes.json catalog, removal-test, lessons, spec-evolver (rounds + halt + approval drop + apply/reject), `josh evolve` + `josh lesson` CLI, --simulator mode for tests, full smoke covering converged path, approve flow, regression+reject path, v1 agent allowlist enforcement.
+- **Surprises:** First Edit-tool injection of cmdEvolve/cmdLesson into josh.js silently failed to take effect (success message but functions missing on disk). Re-applied; second edit landed correctly. Cause likely a transient tool race; the master design's "verify-by-grep after major edits" practice would have caught it earlier — promoting that to standard procedure for the remaining phases.
+- **Deferred to 7B:** real-runtime dispatch loop (we ship simulator mode + the file contract; the actual model-side iteration is the runtime's job per master design §1.3).
+
+---
+
+## Phase 8 — Cross-runtime gateway
+
+- **Started:** (next)
+- **Branch:** `claude/josh-phase8-cross-runtime` (off Phase 7 HEAD)
+- **Plan doc:** `2026-05-10-josh-cross-runtime-phase8.md`
