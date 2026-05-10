@@ -86,6 +86,23 @@ function applySync(projectId, opts = {}) {
   let agents_updated = 0;
   let tasks_updated = 0;
 
+  // Build display_id -> ulid lookup for resolving dependencies.
+  const displayToUlid = {};
+  if (!dryRun) {
+    const states = ['incoming', 'triaged', 'in_progress', 'done', 'blocked', 'failed', 'cancelled'];
+    for (const state of states) {
+      const dir = path.join(joshRoot, 'todo', state);
+      if (!fs.existsSync(dir)) continue;
+      for (const file of fs.readdirSync(dir)) {
+        if (!file.endsWith('.json')) continue;
+        let todo;
+        try { todo = readJson(path.join(dir, file)); } catch (e) { continue; }
+        if (todo.project_id !== projectId) continue;
+        if (todo.display_id) displayToUlid[todo.display_id] = todo.id;
+      }
+    }
+  }
+
   if (!dryRun) {
     for (const change of diff.agents_changed) {
       const manifestPath = path.join(joshRoot, 'agents', change.id, 'manifest.json');
@@ -122,6 +139,10 @@ function applySync(projectId, opts = {}) {
       todo.phase_name = fresh.phase_name;
       todo.primary_role = fresh.primary_role;
       todo.depends_on_display_ids = fresh.depends_on_display_ids;
+      todo.depends_on = fresh.depends_on_display_ids
+        .map((d) => displayToUlid[d])
+        .filter(Boolean)
+        .map((id) => ({ id, kind: 'hard' }));
       todo.blocks_display_ids = fresh.blocks_display_ids;
       todo.parallel_safety = fresh.parallel_safety;
       todo.synced_at = now;
