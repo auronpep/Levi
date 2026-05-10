@@ -2719,6 +2719,11 @@ function cmdHelp() {
   log(`  lock list [--json]                                     list held locks`);
   log(`  list locks                    alias for lock list`);
   log(``);
+  log(`project ops:`);
+  log(`  josh project import <corpus-path>          import a Markdown corpus (project + agents + todos)`);
+  log(`  josh project status [--project ID]         render the daily-review template`);
+  log(`  josh project sync   [--project ID] [--dry-run]   refresh imported entities from source`);
+  log(``);
   log(`  help                          show this message`);
   log(`  version                       show CLI version`);
   log(``);
