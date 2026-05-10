@@ -2544,6 +2544,63 @@ function cmdValidate(args) {
   return parsed.values.strict && results.errors.length > 0 ? 1 : 0;
 }
 
+function cmdProject(args) {
+  const sub = args[0];
+  const rest = args.slice(1);
+  if (!sub || sub === 'help' || sub === '--help' || sub === '-h') {
+    log(`Usage: josh project <subcommand>
+
+Subcommands:
+  import <corpus-path>    Import a Markdown corpus (project + agents + todos)
+  status [--project ID]   Render the daily-review template
+  sync [--project ID]     Refresh imported entities from source files`);
+    return 0;
+  }
+  switch (sub) {
+    case 'import':  return cmdProjectImport(rest);
+    case 'status':  return cmdProjectStatus(rest);
+    case 'sync':    return cmdProjectSync(rest);
+    default:
+      err(`unknown project subcommand: ${sub}`);
+      return 1;
+  }
+}
+
+function cmdProjectImport(args) {
+  if (args.length < 1 || args[0].startsWith('-')) {
+    err('usage: josh project import <corpus-path>');
+    return 1;
+  }
+  const corpusPath = path.resolve(args[0]);
+  if (!fs.existsSync(corpusPath)) {
+    err(`error: corpus path does not exist: ${corpusPath}`);
+    return 2;
+  }
+  const { importProject } = require('./lib/project-importer');
+  const actor = defaultActor();
+  try {
+    const result = importProject(corpusPath, { joshRoot: JOSH_ROOT, actor });
+    log(`imported project ${result.project_id}`);
+    log(`  todos:  ${result.todo_count}`);
+    log(`  agents: ${result.agent_count}`);
+    return 0;
+  } catch (e) {
+    err(`import failed: ${e.message}`);
+    if (process.env.JOSH_DEBUG) err(e.stack);
+    return 4;
+  }
+}
+
+function cmdProjectStatus(args) {
+  err('not yet implemented (Task 12)');
+  return 1;
+}
+
+function cmdProjectSync(args) {
+  err('not yet implemented (Task 14)');
+  return 1;
+}
+
 function cmdHelp() {
   log(`josh — CLI for the ~/.josh/ shared agent runtime`);
   log(``);
@@ -2656,6 +2713,7 @@ const COMMANDS = {
   deny: cmdDeny,
   review: cmdReview,
   validate: cmdValidate,
+  project: cmdProject,
   lock: cmdLock,
   help: cmdHelp,
   '--help': cmdHelp,
