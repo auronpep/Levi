@@ -515,3 +515,54 @@ test('cli: tick sweeps doom-looped todos to blocked/', () => {
 
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+test('cli: heartbeat resets claim.at and emits a heartbeat event', () => {
+  const root = setupRoot();
+
+  const dir = path.join(root, 'todo', 'in_progress', '01HB');
+  fs.mkdirSync(dir, { recursive: true });
+  const oldTs = '2026-05-10T01:00:00.000Z';
+  fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify({
+    schema: 1, id: '01HB',
+    claim: { by: 'A01', at: oldTs, ttl_sec: 3600 },
+    history: [{ at: oldTs, actor: 'A01', event: 'claimed' }],
+  }, null, 2));
+  fs.writeFileSync(path.join(dir, 'state'), 'in_progress\n');
+  fs.writeFileSync(path.join(dir, 'events.ndjson'), '');
+
+  const out = runCli('heartbeat 01HB --as A01', { JOSH_ROOT: root });
+  assert.match(out, /heartbeat: 01HB/);
+
+  const meta = JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8'));
+  assert.notEqual(meta.claim.at, oldTs);
+  const last = meta.history[meta.history.length - 1];
+  assert.equal(last.event, 'heartbeat');
+  assert.equal(last.actor, 'A01');
+
+  const events = fs.readFileSync(path.join(dir, 'events.ndjson'), 'utf8').trim().split('\n');
+  const lastEvent = JSON.parse(events[events.length - 1]);
+  assert.equal(lastEvent.kind, 'heartbeat');
+  assert.equal(lastEvent.actor, 'A01');
+
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('cli: heartbeat refuses on a terminal state', () => {
+  const root = setupRoot();
+
+  const dir = path.join(root, 'todo', 'done', '01D');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify({ schema: 1, id: '01D', history: [] }));
+  fs.writeFileSync(path.join(dir, 'state'), 'done\n');
+
+  let exitCode = 0; let stderrOut = '';
+  try {
+    execSync(`node "${JOSH_BIN}" heartbeat 01D --as A01`, {
+      env: { ...process.env, JOSH_ROOT: root }, stdio: 'pipe',
+    });
+  } catch (e) { exitCode = e.status; stderrOut = e.stderr.toString(); }
+  assert.equal(exitCode, 1);
+  assert.match(stderrOut, /state.*'done'/);
+
+  fs.rmSync(root, { recursive: true, force: true });
+});

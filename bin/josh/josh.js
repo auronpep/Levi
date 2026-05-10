@@ -1574,6 +1574,51 @@ function cmdComplete(args) {
   return 0;
 }
 
+function cmdHeartbeat(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        as:    { type: 'string' },
+        actor: { type: 'string' },
+      },
+      allowPositionals: true,
+      strict: true
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const idArg = parsed.positionals[0];
+  if (!idArg) return errExit('heartbeat requires <todo-id>', 1);
+
+  const actor = resolveActor(parsed.values);
+  const allowed = ['claimed', 'planning', 'awaiting_approval', 'in_progress'];
+  const located = locateTodo(idArg, allowed);
+  if (located.error) return errExit(located.error, located.code);
+
+  const todo = readJson(located.path);
+  if (!todo) return errExit(`malformed todo at ${located.relative}`, 4);
+
+  const now = new Date().toISOString();
+  if (todo.claim) todo.claim.at = now;
+  todo.history = todo.history || [];
+  todo.history.push({ at: now, actor, event: 'heartbeat' });
+  writeJsonAtomic(located.path, todo);
+
+  // Per-todo events stream.
+  try {
+    ew.appendEvent(JOSH_ROOT, located.state, located.id, {
+      kind: 'heartbeat',
+      at: now,
+      actor,
+    });
+  } catch (e) { /* non-fatal */ }
+
+  appendAudit({ actor, action: 'todo.heartbeat', id: located.id, details: {} });
+  log(`heartbeat: ${located.id} at ${now}`);
+  return 0;
+}
+
 function cmdFail(args) {
   let parsed;
   try {
@@ -3283,6 +3328,7 @@ const COMMANDS = {
   tick: cmdTick,
   control: cmdControl,
   claim: cmdClaim,
+  heartbeat: cmdHeartbeat,
   complete: cmdComplete,
   fail: cmdFail,
   block: cmdBlock,
