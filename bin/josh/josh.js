@@ -670,9 +670,11 @@ function sweepStaleClaims(opts) {
 
 function promoteApproved() {
   let promoted = 0;
+  let throttled = 0;
   const dir = path.join(JOSH_ROOT, 'todo', 'approved');
   let entries = [];
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return 0; }
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return { promoted, throttled }; }
+  const { checkBackpressure } = require('./lib/backpressure');
   for (const e of entries) {
     if (!e.isDirectory()) continue;
     const id = e.name;
@@ -685,6 +687,9 @@ function promoteApproved() {
     const metaPath = path.join(folder, 'meta.json');
     const todo = readJson(metaPath);
     if (!todo) continue;
+    // Phase 3: backpressure gate.
+    const bp = checkBackpressure(JOSH_ROOT, todo);
+    if (!bp.ok) { throttled++; continue; }
     todo.history = todo.history || [];
     todo.history.push({
       at: new Date().toISOString(),
@@ -701,7 +706,7 @@ function promoteApproved() {
     });
     promoted++;
   }
-  return promoted;
+  return { promoted, throttled };
 }
 
 function processControlOne(file) {
@@ -1201,7 +1206,12 @@ function cmdTick(args) {
 
     // 5b. Promote approved → in_progress (Phase 2A dispatch)
     let promoted = 0;
-    if (!paused) promoted = promoteApproved();
+    let throttled = 0;
+    if (!paused) {
+      const r = promoteApproved();
+      promoted = r.promoted;
+      throttled = r.throttled;
+    }
 
     // 6. Auto-resolve expired approvals (default decision applied)
     expired = expireApprovals();
@@ -1233,6 +1243,7 @@ function cmdTick(args) {
         triaged_failed: triagedFailed,
         swept,
         promoted,
+        throttled,
         expired_approvals: expired,
         paused,
         draining,
@@ -1244,11 +1255,11 @@ function cmdTick(args) {
     const tickN = status.agents.orchestrator.tick_count;
     if (verbose) {
       log(`tick ${tickN} @ ${status.agents.orchestrator.last_tick}`);
-      log(`  controls: ${controlsProcessed}  triaged: ${triaged} (routed: ${routed})  swept: ${swept}  promoted: ${promoted}  expired: ${expired}  failed: ${triagedFailed}`);
+      log(`  controls: ${controlsProcessed}  triaged: ${triaged} (routed: ${routed})  swept: ${swept}  promoted: ${promoted}  throttled: ${throttled}  expired: ${expired}  failed: ${triagedFailed}`);
       log(`  paused: ${paused}  draining: ${draining}`);
       log(`  queue: incoming=${status.queue.incoming} triaged=${status.queue.triaged} in_progress=${status.queue.in_progress}`);
     } else {
-      log(`tick ${tickN}: triaged=${triaged}${routed > 0 ? ` (routed:${routed})` : ''} swept=${swept} promoted=${promoted} expired=${expired} controls=${controlsProcessed}${paused ? ' [paused]' : ''}${draining ? ' [draining]' : ''}`);
+      log(`tick ${tickN}: triaged=${triaged}${routed > 0 ? ` (routed:${routed})` : ''} swept=${swept} promoted=${promoted}${throttled > 0 ? ` throttled=${throttled}` : ''} expired=${expired} controls=${controlsProcessed}${paused ? ' [paused]' : ''}${draining ? ' [draining]' : ''}`);
     }
   } finally {
     lockRelease();
@@ -1382,6 +1393,14 @@ function cmdClaim(args) {
         return errExit(`dependencies not yet done: ${list}`, 3);
       }
     }
+    // Phase 3: backpressure — advisory check at claim time so the agent learns early.
+    {
+      const { checkBackpressure } = require('./lib/backpressure');
+      const bp = checkBackpressure(JOSH_ROOT, todo);
+      if (!bp.ok && (bp.scope === 'global' || bp.scope === 'phase')) {
+        return errExit(`backpressure: ${bp.reason}`, 3);
+      }
+    }
     // Load brief (asserts manifest + source exist).
     let brief;
     try {
@@ -1421,7 +1440,7 @@ function cmdClaim(args) {
   }
 
   // Backward-compatible path: triaged → in_progress (no --agent).
-  // Phase 3: hard-dep enforcement also applies here.
+  // Phase 3: hard-dep enforcement + backpressure also apply here.
   {
     const located = locateTodo(idArg, ['triaged']);
     if (located.error) return errExit(located.error, located.code);
@@ -1433,6 +1452,9 @@ function cmdClaim(args) {
       const list = dep.blocked_by.map((b) => `${b.display_id}(${b.state})`).join(', ');
       return errExit(`dependencies not yet done: ${list}`, 3);
     }
+    const { checkBackpressure } = require('./lib/backpressure');
+    const bp = checkBackpressure(JOSH_ROOT, todo);
+    if (!bp.ok) return errExit(`backpressure: ${bp.reason}`, 3);
   }
 
   const r = transitionTodo({

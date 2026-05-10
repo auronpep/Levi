@@ -417,3 +417,72 @@ test('cli: claim succeeds once hard dep is done', () => {
 
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+test('cli: claim refuses when global backpressure cap is hit', () => {
+  const root = setupRoot();
+
+  fs.writeFileSync(
+    path.join(root, 'orchestrator', 'backpressure.json'),
+    JSON.stringify({ schema: 1, max_concurrent: 1 })
+  );
+
+  // One in_progress to fill the cap.
+  const dirA = path.join(root, 'todo', 'in_progress', '01A');
+  fs.mkdirSync(dirA, { recursive: true });
+  fs.writeFileSync(path.join(dirA, 'meta.json'), JSON.stringify({
+    schema: 1, id: '01A', primary_role: 'A02',
+  }));
+  fs.writeFileSync(path.join(dirA, 'state'), 'in_progress\n');
+
+  // Triaged candidate to claim with legacy path (no --agent).
+  const dirB = path.join(root, 'todo', 'triaged', '01B');
+  fs.mkdirSync(dirB, { recursive: true });
+  fs.writeFileSync(path.join(dirB, 'meta.json'), JSON.stringify({
+    schema: 1, id: '01B', primary_role: 'A01', history: [],
+  }));
+  fs.writeFileSync(path.join(dirB, 'state'), 'triaged\n');
+  fs.writeFileSync(path.join(dirB, 'events.ndjson'), '');
+
+  let exitCode = 0; let stderrOut = '';
+  try {
+    execSync(`node "${JOSH_BIN}" claim 01B --as A01`, {
+      env: { ...process.env, JOSH_ROOT: root }, stdio: 'pipe',
+    });
+  } catch (e) { exitCode = e.status; stderrOut = e.stderr.toString(); }
+  assert.equal(exitCode, 3, `expected exit 3, got ${exitCode}; stderr: ${stderrOut}`);
+  assert.match(stderrOut, /backpressure/i);
+  assert.equal(fs.existsSync(path.join(root, 'todo', 'in_progress', '01B')), false);
+  assert.equal(fs.existsSync(path.join(root, 'todo', 'triaged', '01B')), true);
+
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('cli: tick refuses to promote approved → in_progress when backpressure full', () => {
+  const root = setupRoot();
+
+  fs.writeFileSync(
+    path.join(root, 'orchestrator', 'backpressure.json'),
+    JSON.stringify({ schema: 1, max_concurrent: 1 })
+  );
+
+  const dirA = path.join(root, 'todo', 'in_progress', '01A');
+  fs.mkdirSync(dirA, { recursive: true });
+  fs.writeFileSync(path.join(dirA, 'meta.json'), JSON.stringify({ schema: 1, id: '01A' }));
+  fs.writeFileSync(path.join(dirA, 'state'), 'in_progress\n');
+
+  const dirB = path.join(root, 'todo', 'approved', '01B');
+  fs.mkdirSync(dirB, { recursive: true });
+  fs.writeFileSync(path.join(dirB, 'meta.json'), JSON.stringify({
+    schema: 1, id: '01B', primary_role: 'A01', history: [],
+  }));
+  fs.writeFileSync(path.join(dirB, 'state'), 'approved\n');
+  fs.writeFileSync(path.join(dirB, 'approval'), 'approved');
+  fs.writeFileSync(path.join(dirB, 'events.ndjson'), '');
+
+  runCli('tick', { JOSH_ROOT: root });
+
+  assert.equal(fs.existsSync(path.join(root, 'todo', 'approved', '01B')), true);
+  assert.equal(fs.existsSync(path.join(root, 'todo', 'in_progress', '01B')), false);
+
+  fs.rmSync(root, { recursive: true, force: true });
+});
