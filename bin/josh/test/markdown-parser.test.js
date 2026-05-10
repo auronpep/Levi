@@ -54,3 +54,32 @@ test('parseRequiredOrder: empty input', () => {
   assert.deepEqual(result.after, []);
   assert.deepEqual(result.before, []);
 });
+
+const { parseDispatchBlock } = require('../lib/markdown-parser');
+
+const SAMPLE_DISPATCH = `## Dispatch
+
+- Day: 1 - May 9, 2026
+- Phase: 01 - Command Center And Sequence Lock
+- Primary role: A01 Command Center
+- Required order: after \`none\`, before \`D1-002\`
+- Parallel safety: this task may run in parallel only with tasks in the same phase that do not edit the same output file.
+
+## Why This Task Exists`;
+
+test('parseDispatchBlock: extracts all fields', () => {
+  const result = parseDispatchBlock(SAMPLE_DISPATCH);
+  assert.equal(result.day, 1);
+  assert.equal(result.day_date, 'May 9, 2026');
+  assert.equal(result.phase_num, 1);
+  assert.equal(result.phase_name, 'Command Center And Sequence Lock');
+  assert.equal(result.primary_role, 'A01');
+  assert.deepEqual(result.required_order.after, []);
+  assert.deepEqual(result.required_order.before, ['D1-002']);
+  assert.match(result.parallel_safety, /same phase/);
+});
+
+test('parseDispatchBlock: returns null for missing dispatch section', () => {
+  const result = parseDispatchBlock('# Some doc with no dispatch section');
+  assert.equal(result, null);
+});

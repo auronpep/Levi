@@ -38,4 +38,60 @@ function parseRequiredOrder(text) {
   return result;
 }
 
-module.exports = { extractFrontmatter, parseRequiredOrder };
+function parseDispatchBlock(text) {
+  const dispatchIdx = text.indexOf('## Dispatch');
+  if (dispatchIdx === -1) return null;
+  const afterDispatch = text.slice(dispatchIdx + '## Dispatch'.length);
+  const nextH2 = afterDispatch.search(/\n## /);
+  const block = nextH2 === -1 ? afterDispatch : afterDispatch.slice(0, nextH2);
+
+  const findField = (label) => {
+    const re = new RegExp(`-\\s+${label}:\\s+(.+)`, 'i');
+    const m = block.match(re);
+    return m ? m[1].trim() : null;
+  };
+
+  const dayLine = findField('Day');
+  let day = null, dayDate = null;
+  if (dayLine) {
+    const dayMatch = dayLine.match(/^(\d+)\s*-\s*(.+)$/);
+    if (dayMatch) {
+      day = parseInt(dayMatch[1], 10);
+      dayDate = dayMatch[2].trim();
+    }
+  }
+
+  const phaseLine = findField('Phase');
+  let phaseNum = null, phaseName = null;
+  if (phaseLine) {
+    const phaseMatch = phaseLine.match(/^(\d+)\s*-\s*(.+)$/);
+    if (phaseMatch) {
+      phaseNum = parseInt(phaseMatch[1], 10);
+      phaseName = phaseMatch[2].trim();
+    }
+  }
+
+  const primaryRoleLine = findField('Primary role');
+  let primaryRole = null;
+  if (primaryRoleLine) {
+    const roleMatch = primaryRoleLine.match(/^([AE]\d{2})\b/);
+    primaryRole = roleMatch ? roleMatch[1] : primaryRoleLine.split(/\s/)[0];
+  }
+
+  const requiredOrderLine = findField('Required order');
+  const requiredOrder = parseRequiredOrder(requiredOrderLine || '');
+
+  const parallelSafety = findField('Parallel safety');
+
+  return {
+    day,
+    day_date: dayDate,
+    phase_num: phaseNum,
+    phase_name: phaseName,
+    primary_role: primaryRole,
+    required_order: requiredOrder,
+    parallel_safety: parallelSafety,
+  };
+}
+
+module.exports = { extractFrontmatter, parseRequiredOrder, parseDispatchBlock };
