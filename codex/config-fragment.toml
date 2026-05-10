@@ -1,0 +1,25 @@
+# Levi tool-knowledge — Codex hooks fragment.
+#
+# DO NOT auto-merge. Review and integrate manually because [hooks] keys are
+# unique per event name; existing entries (e.g. JP session_start) would be
+# overwritten.
+#
+# The codex_hooks feature flag is required. Verify with:
+#   codex features list | findstr codex_hooks
+# If it isn't already enabled, run:
+#   codex features enable codex_hooks
+#
+# Reference: https://developers.openai.com/codex/hooks
+#
+# The exact event name for "before a Bash tool call" is not yet verified
+# locally. Once you confirm it from the docs, replace `pre_tool_use` below
+# with the actual event name. The runtime script handles both per-call
+# events (with command in the payload) and session_start (general guidance).
+
+[hooks]
+# Per-Bash-call enforcement (preferred — replace event name once verified):
+# pre_tool_use = 'node "C:\\Users\\JesusLovesMe\\.codex\\runtime\\levi\\tool-context-loader.js"'
+
+# Bootstrap-time fallback (works today, less granular). Conflicts with any
+# existing session_start handler — merge with care.
+# session_start = 'node "C:\\Users\\JesusLovesMe\\.codex\\runtime\\levi\\tool-context-loader.js"'
