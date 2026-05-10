@@ -5,6 +5,7 @@ const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
 const { parseAgent, parseTask } = require('./project-importer');
+const tf = require('./todo-folder');
 
 function readJson(p) { return JSON.parse(fs.readFileSync(p, 'utf8')); }
 
@@ -47,14 +48,13 @@ function diffProject(projectId, opts = {}) {
     }
   }
 
-  const states = ['incoming', 'triaged', 'in_progress', 'done', 'blocked', 'failed', 'cancelled'];
+  const states = [
+    'incoming', 'triaged', 'claimed', 'planning', 'awaiting_approval',
+    'approved', 'rejected', 'revised', 'in_progress', 'done',
+    'blocked', 'failed', 'cancelled',
+  ];
   for (const state of states) {
-    const dir = path.join(joshRoot, 'todo', state);
-    if (!fs.existsSync(dir)) continue;
-    for (const file of fs.readdirSync(dir)) {
-      if (!file.endsWith('.json')) continue;
-      let todo;
-      try { todo = readJson(path.join(dir, file)); } catch (e) { continue; }
+    for (const todo of tf.listTodosInState(joshRoot, state)) {
       if (todo.project_id !== projectId) continue;
       if (!fs.existsSync(todo.source_path)) {
         result.tasks_missing.push({ id: todo.id, display_id: todo.display_id, source_path: todo.source_path });
@@ -89,14 +89,13 @@ function applySync(projectId, opts = {}) {
   // Build display_id -> ulid lookup for resolving dependencies.
   const displayToUlid = {};
   if (!dryRun) {
-    const states = ['incoming', 'triaged', 'in_progress', 'done', 'blocked', 'failed', 'cancelled'];
+    const states = [
+      'incoming', 'triaged', 'claimed', 'planning', 'awaiting_approval',
+      'approved', 'rejected', 'revised', 'in_progress', 'done',
+      'blocked', 'failed', 'cancelled',
+    ];
     for (const state of states) {
-      const dir = path.join(joshRoot, 'todo', state);
-      if (!fs.existsSync(dir)) continue;
-      for (const file of fs.readdirSync(dir)) {
-        if (!file.endsWith('.json')) continue;
-        let todo;
-        try { todo = readJson(path.join(dir, file)); } catch (e) { continue; }
+      for (const todo of tf.listTodosInState(joshRoot, state)) {
         if (todo.project_id !== projectId) continue;
         if (todo.display_id) displayToUlid[todo.display_id] = todo.id;
       }
@@ -123,15 +122,16 @@ function applySync(projectId, opts = {}) {
       });
     }
 
-    const states = ['incoming', 'triaged', 'in_progress', 'done', 'blocked', 'failed', 'cancelled'];
+    const allStates = [
+      'incoming', 'triaged', 'claimed', 'planning', 'awaiting_approval',
+      'approved', 'rejected', 'revised', 'in_progress', 'done',
+      'blocked', 'failed', 'cancelled',
+    ];
     for (const change of diff.tasks_changed) {
-      let todoPath = null;
-      for (const state of states) {
-        const candidate = path.join(joshRoot, 'todo', state, `${change.id}.json`);
-        if (fs.existsSync(candidate)) { todoPath = candidate; break; }
-      }
-      if (!todoPath) continue;
-      const todo = readJson(todoPath);
+      const found = tf.findFolderById(joshRoot, change.id);
+      if (!found) continue;
+      const todo = tf.readMeta(joshRoot, found.state, found.id);
+      if (!todo) continue;
       const fresh = parseTask(todo.source_path);
       todo.title = fresh.title;
       todo.day = fresh.day;
@@ -149,7 +149,7 @@ function applySync(projectId, opts = {}) {
       todo.synced_by = actor;
       todo.history = todo.history || [];
       todo.history.push({ at: now, actor, event: 'synced' });
-      writeJsonAtomic(todoPath, todo);
+      tf.writeMeta(joshRoot, found.state, found.id, todo);
       tasks_updated++;
       appendAuditEvent(joshRoot, {
         schema: 1, at: now, actor, action: 'todo.synced', id: todo.id,

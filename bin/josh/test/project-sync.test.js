@@ -66,12 +66,13 @@ test('applySync: also updates depends_on (resolved ULIDs) when display_ids chang
 
   applySync(project_id, { joshRoot: tmpRoot, actor: 'cli:test' });
 
-  // Find D1-001's todo file
+  // Find D1-001's todo file (folder layout: todo/triaged/<ulid>/meta.json)
   let d1001Todo = null;
   let d1003Todo = null;
-  for (const file of fs.readdirSync(path.join(tmpRoot, 'todo/triaged'))) {
-    if (!file.endsWith('.json')) continue;
-    const todo = JSON.parse(fs.readFileSync(path.join(tmpRoot, 'todo/triaged', file), 'utf8'));
+  for (const folder of fs.readdirSync(path.join(tmpRoot, 'todo/triaged'))) {
+    const metaPath = path.join(tmpRoot, 'todo/triaged', folder, 'meta.json');
+    if (!fs.existsSync(metaPath)) continue;
+    const todo = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
     if (todo.display_id === 'D1-001') d1001Todo = todo;
     if (todo.display_id === 'D1-003') d1003Todo = todo;
   }
