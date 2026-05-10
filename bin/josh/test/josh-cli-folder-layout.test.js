@@ -177,3 +177,35 @@ test('cli: plan submit rejects an invalid plan', () => {
 
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+test('cli: tick promotes approved → in_progress', () => {
+  const root = setupRoot();
+  // Seed agent
+  const briefSource = path.join(root, 'AGENT_05.md');
+  fs.writeFileSync(briefSource, '# Agent A05\n');
+  fs.mkdirSync(path.join(root, 'agents', 'A05'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'agents', 'A05', 'manifest.json'), JSON.stringify({
+    schema: 1, id: 'A05', source_path: briefSource,
+  }));
+  const out = runCli('push todo "tick-promo"', { JOSH_ROOT: root });
+  const id = out.trim().split('\n').filter(Boolean).pop().trim();
+  runCli('tick', { JOSH_ROOT: root });
+  const metaPath = path.join(root, 'todo', 'triaged', id, 'meta.json');
+  const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+  meta.primary_role = 'A05';
+  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+  runCli(`claim ${id} --agent A05 --as A05`, { JOSH_ROOT: root });
+  const planSource = path.resolve(__dirname, 'fixtures/sample-plan.md');
+  runCli(`plan submit ${id} --plan "${planSource}" --as A05`, { JOSH_ROOT: root });
+  runCli(`plan approve ${id} --as human`, { JOSH_ROOT: root });
+
+  assert.equal(fs.existsSync(path.join(root, 'todo', 'approved', id)), true, 'should be in approved');
+
+  // Tick
+  runCli('tick', { JOSH_ROOT: root });
+
+  assert.equal(fs.existsSync(path.join(root, 'todo', 'approved', id)), false, 'should leave approved');
+  assert.equal(fs.existsSync(path.join(root, 'todo', 'in_progress', id, 'meta.json')), true, 'should land in in_progress');
+
+  fs.rmSync(root, { recursive: true, force: true });
+});

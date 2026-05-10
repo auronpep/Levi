@@ -636,6 +636,42 @@ function sweepStaleClaims(opts) {
   return swept;
 }
 
+function promoteApproved() {
+  let promoted = 0;
+  const dir = path.join(JOSH_ROOT, 'todo', 'approved');
+  let entries = [];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return 0; }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const id = e.name;
+    const folder = path.join(dir, id);
+    // Confirm approval signal == "approved" before promoting.
+    const signalPath = path.join(folder, 'approval');
+    let signal = '';
+    try { signal = fs.readFileSync(signalPath, 'utf8').trim(); } catch (err) {}
+    if (signal !== 'approved') continue;
+    const metaPath = path.join(folder, 'meta.json');
+    const todo = readJson(metaPath);
+    if (!todo) continue;
+    todo.history = todo.history || [];
+    todo.history.push({
+      at: new Date().toISOString(),
+      actor: 'orchestrator',
+      event: 'auto_promoted',
+      details: { from: 'approved', to: 'in_progress' },
+    });
+    moveTodo(metaPath, 'in_progress', todo);
+    appendAudit({
+      actor: 'orchestrator',
+      action: 'todo.auto_promoted',
+      id: todo.id,
+      details: { from: 'approved', to: 'in_progress' },
+    });
+    promoted++;
+  }
+  return promoted;
+}
+
 function processControlOne(file) {
   const ctrl = readJson(file.path);
   // Always remove the file, even on parse error.
@@ -1131,6 +1167,10 @@ function cmdTick(args) {
     // 5. Sweep stale claims
     swept = sweepStaleClaims();
 
+    // 5b. Promote approved → in_progress (Phase 2A dispatch)
+    let promoted = 0;
+    if (!paused) promoted = promoteApproved();
+
     // 6. Auto-resolve expired approvals (default decision applied)
     expired = expireApprovals();
 
@@ -1160,6 +1200,7 @@ function cmdTick(args) {
         routed,
         triaged_failed: triagedFailed,
         swept,
+        promoted,
         expired_approvals: expired,
         paused,
         draining,
@@ -1171,11 +1212,11 @@ function cmdTick(args) {
     const tickN = status.agents.orchestrator.tick_count;
     if (verbose) {
       log(`tick ${tickN} @ ${status.agents.orchestrator.last_tick}`);
-      log(`  controls: ${controlsProcessed}  triaged: ${triaged} (routed: ${routed})  swept: ${swept}  expired: ${expired}  failed: ${triagedFailed}`);
+      log(`  controls: ${controlsProcessed}  triaged: ${triaged} (routed: ${routed})  swept: ${swept}  promoted: ${promoted}  expired: ${expired}  failed: ${triagedFailed}`);
       log(`  paused: ${paused}  draining: ${draining}`);
       log(`  queue: incoming=${status.queue.incoming} triaged=${status.queue.triaged} in_progress=${status.queue.in_progress}`);
     } else {
-      log(`tick ${tickN}: triaged=${triaged}${routed > 0 ? ` (routed:${routed})` : ''} swept=${swept} expired=${expired} controls=${controlsProcessed}${paused ? ' [paused]' : ''}${draining ? ' [draining]' : ''}`);
+      log(`tick ${tickN}: triaged=${triaged}${routed > 0 ? ` (routed:${routed})` : ''} swept=${swept} promoted=${promoted} expired=${expired} controls=${controlsProcessed}${paused ? ' [paused]' : ''}${draining ? ' [draining]' : ''}`);
     }
   } finally {
     lockRelease();
