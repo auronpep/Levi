@@ -14,9 +14,12 @@ function appendEntry({ root, tool, section, text, today }) {
     return { ok: false, error: 'skill not found at ' + skillPath };
   }
   const body = fs.readFileSync(skillPath, 'utf8');
+  // Match the section body. Use `\n## ` as the leading sentinel and `$` (end
+  // of string, no `m` flag) as the trailing alternative so the lazy capture
+  // doesn't bail at end-of-line. Real SKILL.md files always have content
+  // before any `## Traps` / `## Lessons`, so the leading newline is safe.
   const headingRe = new RegExp(
-    '(^## ' + heading + '\\n)([\\s\\S]*?)(?=\\n## |$)',
-    'm'
+    '(\\n## ' + heading + '\\n)([\\s\\S]*?)(?=\\n## |$)'
   );
   const m = body.match(headingRe);
   if (!m) {
