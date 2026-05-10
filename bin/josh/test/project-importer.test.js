@@ -59,3 +59,44 @@ test('parseAgent: A03 includes mission and gates', () => {
   assert.equal(result.id, 'A03');
   assert.match(result.mission_summary, /unsupported claims/);
 });
+
+const { importProject } = require('../lib/project-importer');
+const fs = require('node:fs');
+const os = require('node:os');
+
+const FIXTURE_CORPUS = path.join(__dirname, 'fixtures/corpus');
+
+test('importProject: writes charter, todos, agent manifests under JOSH_ROOT', () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'josh-test-'));
+  fs.mkdirSync(path.join(tmpRoot, 'projects'), { recursive: true });
+  fs.mkdirSync(path.join(tmpRoot, 'agents'), { recursive: true });
+  fs.mkdirSync(path.join(tmpRoot, 'todo', 'triaged'), { recursive: true });
+  fs.mkdirSync(path.join(tmpRoot, 'audit'), { recursive: true });
+
+  const result = importProject(FIXTURE_CORPUS, { joshRoot: tmpRoot, actor: 'cli:test' });
+
+  assert.equal(result.todo_count, 2);
+  assert.equal(result.agent_count, 2);
+  assert.equal(typeof result.project_id, 'string');
+
+  const charterPath = path.join(tmpRoot, 'projects', result.project_id, 'charter.json');
+  assert.equal(fs.existsSync(charterPath), true);
+  const charter = JSON.parse(fs.readFileSync(charterPath, 'utf8'));
+  assert.equal(charter.title, 'Four-Day Full Project Dispatch');
+  assert.equal(charter.imported_by, 'cli:test');
+
+  const a01Path = path.join(tmpRoot, 'agents', 'A01', 'manifest.json');
+  assert.equal(fs.existsSync(a01Path), true);
+  const a01 = JSON.parse(fs.readFileSync(a01Path, 'utf8'));
+  assert.equal(a01.id, 'A01');
+  assert.equal(a01.version, 1);
+  assert.match(a01.source_path_hash, /^[a-f0-9]{64}$/);
+
+  const triaged = fs.readdirSync(path.join(tmpRoot, 'todo', 'triaged'));
+  assert.equal(triaged.length, 2);
+
+  const auditFiles = fs.readdirSync(path.join(tmpRoot, 'audit'));
+  assert.ok(auditFiles.length > 0);
+
+  fs.rmSync(tmpRoot, { recursive: true, force: true });
+});
