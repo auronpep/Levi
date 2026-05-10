@@ -342,3 +342,227 @@ test('lifecycle events: fail writes a failed event with reason', () => {
   assert.equal(failed[0].reason, 'broken', 'failed event should carry the reason');
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+test('cli: claim refuses when hard dep is not done', () => {
+  const root = setupRoot();
+
+  // Seed agent A01 manifest (so --agent path works).
+  const agentDir = path.join(root, 'agents', 'A01');
+  fs.mkdirSync(agentDir, { recursive: true });
+  const briefPath = path.join(agentDir, 'brief.md');
+  fs.writeFileSync(briefPath, '# Agent A01\n');
+  fs.writeFileSync(path.join(agentDir, 'manifest.json'), JSON.stringify({
+    schema: 1, id: 'A01', source_path: briefPath,
+  }, null, 2));
+
+  function seedTriaged(id, meta) {
+    const dir = path.join(root, 'todo', 'triaged', id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify({
+      schema: 1, id, primary_role: 'A01', history: [], ...meta,
+    }, null, 2));
+    fs.writeFileSync(path.join(dir, 'state'), 'triaged\n');
+    fs.writeFileSync(path.join(dir, 'events.ndjson'), '');
+  }
+  seedTriaged('01DEP002', { display_id: 'D1-002', depends_on: [], depends_on_display_ids: [] });
+  seedTriaged('01DEP003', {
+    display_id: 'D1-003',
+    depends_on: [{ id: '01DEP002', kind: 'hard' }],
+    depends_on_display_ids: ['D1-002'],
+  });
+
+  let exitCode = 0; let stderrOut = '';
+  try {
+    execSync(`node "${JOSH_BIN}" claim 01DEP003 --agent A01 --as A01`, {
+      env: { ...process.env, JOSH_ROOT: root }, stdio: 'pipe',
+    });
+  } catch (e) { exitCode = e.status; stderrOut = e.stderr.toString(); }
+  assert.equal(exitCode, 3, `expected exit 3, got ${exitCode}; stderr: ${stderrOut}`);
+  assert.match(stderrOut, /D1-002/);
+  assert.match(stderrOut, /dependencies/i);
+
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('cli: claim succeeds once hard dep is done', () => {
+  const root = setupRoot();
+
+  const agentDir = path.join(root, 'agents', 'A01');
+  fs.mkdirSync(agentDir, { recursive: true });
+  const briefPath = path.join(agentDir, 'brief.md');
+  fs.writeFileSync(briefPath, '# Agent A01\n');
+  fs.writeFileSync(path.join(agentDir, 'manifest.json'), JSON.stringify({
+    schema: 1, id: 'A01', source_path: briefPath,
+  }, null, 2));
+
+  function seed(state, id, meta) {
+    const dir = path.join(root, 'todo', state, id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify({
+      schema: 1, id, primary_role: 'A01', history: [], ...meta,
+    }, null, 2));
+    fs.writeFileSync(path.join(dir, 'state'), state + '\n');
+    fs.writeFileSync(path.join(dir, 'events.ndjson'), '');
+  }
+  seed('done',    '01DEP002', { display_id: 'D1-002' });
+  seed('triaged', '01DEP003', {
+    display_id: 'D1-003',
+    depends_on: [{ id: '01DEP002', kind: 'hard' }],
+    depends_on_display_ids: ['D1-002'],
+  });
+
+  const out = runCli('claim 01DEP003 --agent A01 --as A01', { JOSH_ROOT: root });
+  assert.match(out, /01DEP003/);
+  assert.equal(fs.existsSync(path.join(root, 'todo', 'claimed', '01DEP003', 'meta.json')), true);
+
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('cli: claim refuses when global backpressure cap is hit', () => {
+  const root = setupRoot();
+
+  fs.writeFileSync(
+    path.join(root, 'orchestrator', 'backpressure.json'),
+    JSON.stringify({ schema: 1, max_concurrent: 1 })
+  );
+
+  // One in_progress to fill the cap.
+  const dirA = path.join(root, 'todo', 'in_progress', '01A');
+  fs.mkdirSync(dirA, { recursive: true });
+  fs.writeFileSync(path.join(dirA, 'meta.json'), JSON.stringify({
+    schema: 1, id: '01A', primary_role: 'A02',
+  }));
+  fs.writeFileSync(path.join(dirA, 'state'), 'in_progress\n');
+
+  // Triaged candidate to claim with legacy path (no --agent).
+  const dirB = path.join(root, 'todo', 'triaged', '01B');
+  fs.mkdirSync(dirB, { recursive: true });
+  fs.writeFileSync(path.join(dirB, 'meta.json'), JSON.stringify({
+    schema: 1, id: '01B', primary_role: 'A01', history: [],
+  }));
+  fs.writeFileSync(path.join(dirB, 'state'), 'triaged\n');
+  fs.writeFileSync(path.join(dirB, 'events.ndjson'), '');
+
+  let exitCode = 0; let stderrOut = '';
+  try {
+    execSync(`node "${JOSH_BIN}" claim 01B --as A01`, {
+      env: { ...process.env, JOSH_ROOT: root }, stdio: 'pipe',
+    });
+  } catch (e) { exitCode = e.status; stderrOut = e.stderr.toString(); }
+  assert.equal(exitCode, 3, `expected exit 3, got ${exitCode}; stderr: ${stderrOut}`);
+  assert.match(stderrOut, /backpressure/i);
+  assert.equal(fs.existsSync(path.join(root, 'todo', 'in_progress', '01B')), false);
+  assert.equal(fs.existsSync(path.join(root, 'todo', 'triaged', '01B')), true);
+
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('cli: tick refuses to promote approved → in_progress when backpressure full', () => {
+  const root = setupRoot();
+
+  fs.writeFileSync(
+    path.join(root, 'orchestrator', 'backpressure.json'),
+    JSON.stringify({ schema: 1, max_concurrent: 1 })
+  );
+
+  const dirA = path.join(root, 'todo', 'in_progress', '01A');
+  fs.mkdirSync(dirA, { recursive: true });
+  fs.writeFileSync(path.join(dirA, 'meta.json'), JSON.stringify({ schema: 1, id: '01A' }));
+  fs.writeFileSync(path.join(dirA, 'state'), 'in_progress\n');
+
+  const dirB = path.join(root, 'todo', 'approved', '01B');
+  fs.mkdirSync(dirB, { recursive: true });
+  fs.writeFileSync(path.join(dirB, 'meta.json'), JSON.stringify({
+    schema: 1, id: '01B', primary_role: 'A01', history: [],
+  }));
+  fs.writeFileSync(path.join(dirB, 'state'), 'approved\n');
+  fs.writeFileSync(path.join(dirB, 'approval'), 'approved');
+  fs.writeFileSync(path.join(dirB, 'events.ndjson'), '');
+
+  runCli('tick', { JOSH_ROOT: root });
+
+  assert.equal(fs.existsSync(path.join(root, 'todo', 'approved', '01B')), true);
+  assert.equal(fs.existsSync(path.join(root, 'todo', 'in_progress', '01B')), false);
+
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('cli: tick sweeps doom-looped todos to blocked/', () => {
+  const root = setupRoot();
+
+  const dir = path.join(root, 'todo', 'failed', '01LOOP');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify({
+    schema: 1,
+    id: '01LOOP',
+    history: [
+      { at: '2026-05-10T01:00:00Z', actor: 'A01', event: 'failed' },
+      { at: '2026-05-10T02:00:00Z', actor: 'A01', event: 'failed' },
+      { at: '2026-05-10T03:00:00Z', actor: 'A01', event: 'failed' },
+    ],
+  }, null, 2));
+  fs.writeFileSync(path.join(dir, 'state'), 'failed\n');
+  fs.writeFileSync(path.join(dir, 'events.ndjson'), '');
+
+  const out = runCli('tick', { JOSH_ROOT: root });
+  assert.match(out, /doom_looped=1/);
+  assert.equal(fs.existsSync(path.join(root, 'todo', 'failed', '01LOOP')), false);
+  assert.equal(fs.existsSync(path.join(root, 'todo', 'blocked', '01LOOP')), true);
+
+  const meta = JSON.parse(fs.readFileSync(
+    path.join(root, 'todo', 'blocked', '01LOOP', 'meta.json'), 'utf8'));
+  assert.match(meta.blocked_reason, /doom-loop-detected:3/);
+
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('cli: heartbeat resets claim.at and emits a heartbeat event', () => {
+  const root = setupRoot();
+
+  const dir = path.join(root, 'todo', 'in_progress', '01HB');
+  fs.mkdirSync(dir, { recursive: true });
+  const oldTs = '2026-05-10T01:00:00.000Z';
+  fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify({
+    schema: 1, id: '01HB',
+    claim: { by: 'A01', at: oldTs, ttl_sec: 3600 },
+    history: [{ at: oldTs, actor: 'A01', event: 'claimed' }],
+  }, null, 2));
+  fs.writeFileSync(path.join(dir, 'state'), 'in_progress\n');
+  fs.writeFileSync(path.join(dir, 'events.ndjson'), '');
+
+  const out = runCli('heartbeat 01HB --as A01', { JOSH_ROOT: root });
+  assert.match(out, /heartbeat: 01HB/);
+
+  const meta = JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8'));
+  assert.notEqual(meta.claim.at, oldTs);
+  const last = meta.history[meta.history.length - 1];
+  assert.equal(last.event, 'heartbeat');
+  assert.equal(last.actor, 'A01');
+
+  const events = fs.readFileSync(path.join(dir, 'events.ndjson'), 'utf8').trim().split('\n');
+  const lastEvent = JSON.parse(events[events.length - 1]);
+  assert.equal(lastEvent.kind, 'heartbeat');
+  assert.equal(lastEvent.actor, 'A01');
+
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('cli: heartbeat refuses on a terminal state', () => {
+  const root = setupRoot();
+
+  const dir = path.join(root, 'todo', 'done', '01D');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify({ schema: 1, id: '01D', history: [] }));
+  fs.writeFileSync(path.join(dir, 'state'), 'done\n');
+
+  let exitCode = 0; let stderrOut = '';
+  try {
+    execSync(`node "${JOSH_BIN}" heartbeat 01D --as A01`, {
+      env: { ...process.env, JOSH_ROOT: root }, stdio: 'pipe',
+    });
+  } catch (e) { exitCode = e.status; stderrOut = e.stderr.toString(); }
+  assert.equal(exitCode, 1);
+  assert.match(stderrOut, /state.*'done'/);
+
+  fs.rmSync(root, { recursive: true, force: true });
+});

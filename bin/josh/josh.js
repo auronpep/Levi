@@ -670,9 +670,11 @@ function sweepStaleClaims(opts) {
 
 function promoteApproved() {
   let promoted = 0;
+  let throttled = 0;
   const dir = path.join(JOSH_ROOT, 'todo', 'approved');
   let entries = [];
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return 0; }
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return { promoted, throttled }; }
+  const { checkBackpressure } = require('./lib/backpressure');
   for (const e of entries) {
     if (!e.isDirectory()) continue;
     const id = e.name;
@@ -685,6 +687,9 @@ function promoteApproved() {
     const metaPath = path.join(folder, 'meta.json');
     const todo = readJson(metaPath);
     if (!todo) continue;
+    // Phase 3: backpressure gate.
+    const bp = checkBackpressure(JOSH_ROOT, todo);
+    if (!bp.ok) { throttled++; continue; }
     todo.history = todo.history || [];
     todo.history.push({
       at: new Date().toISOString(),
@@ -701,7 +706,7 @@ function promoteApproved() {
     });
     promoted++;
   }
-  return promoted;
+  return { promoted, throttled };
 }
 
 function processControlOne(file) {
@@ -1201,7 +1206,27 @@ function cmdTick(args) {
 
     // 5b. Promote approved → in_progress (Phase 2A dispatch)
     let promoted = 0;
-    if (!paused) promoted = promoteApproved();
+    let throttled = 0;
+    if (!paused) {
+      const r = promoteApproved();
+      promoted = r.promoted;
+      throttled = r.throttled;
+    }
+
+    // 5c. Phase 3: doom-loop sweep — push repeated-failure todos to blocked/
+    let doomLooped = 0;
+    if (!paused) {
+      const { sweepDoomLoops } = require('./lib/doom-loop');
+      doomLooped = sweepDoomLoops(JOSH_ROOT);
+      if (doomLooped > 0) {
+        appendAudit({
+          actor: 'orchestrator',
+          action: 'todo.doom_loop_swept',
+          id: null,
+          details: { count: doomLooped },
+        });
+      }
+    }
 
     // 6. Auto-resolve expired approvals (default decision applied)
     expired = expireApprovals();
@@ -1233,6 +1258,8 @@ function cmdTick(args) {
         triaged_failed: triagedFailed,
         swept,
         promoted,
+        throttled,
+        doom_looped: doomLooped,
         expired_approvals: expired,
         paused,
         draining,
@@ -1244,11 +1271,11 @@ function cmdTick(args) {
     const tickN = status.agents.orchestrator.tick_count;
     if (verbose) {
       log(`tick ${tickN} @ ${status.agents.orchestrator.last_tick}`);
-      log(`  controls: ${controlsProcessed}  triaged: ${triaged} (routed: ${routed})  swept: ${swept}  promoted: ${promoted}  expired: ${expired}  failed: ${triagedFailed}`);
+      log(`  controls: ${controlsProcessed}  triaged: ${triaged} (routed: ${routed})  swept: ${swept}  promoted: ${promoted}  throttled: ${throttled}  doom_looped: ${doomLooped}  expired: ${expired}  failed: ${triagedFailed}`);
       log(`  paused: ${paused}  draining: ${draining}`);
       log(`  queue: incoming=${status.queue.incoming} triaged=${status.queue.triaged} in_progress=${status.queue.in_progress}`);
     } else {
-      log(`tick ${tickN}: triaged=${triaged}${routed > 0 ? ` (routed:${routed})` : ''} swept=${swept} promoted=${promoted} expired=${expired} controls=${controlsProcessed}${paused ? ' [paused]' : ''}${draining ? ' [draining]' : ''}`);
+      log(`tick ${tickN}: triaged=${triaged}${routed > 0 ? ` (routed:${routed})` : ''} swept=${swept} promoted=${promoted}${throttled > 0 ? ` throttled=${throttled}` : ''}${doomLooped > 0 ? ` doom_looped=${doomLooped}` : ''} expired=${expired} controls=${controlsProcessed}${paused ? ' [paused]' : ''}${draining ? ' [draining]' : ''}`);
     }
   } finally {
     lockRelease();
@@ -1373,6 +1400,23 @@ function cmdClaim(args) {
     if (todo.primary_role !== agentId) {
       return errExit(`todo primary_role is '${todo.primary_role || '<unset>'}', expected '${agentId}'`, 1);
     }
+    // Phase 3: hard-dep enforcement.
+    {
+      const { checkDependencies } = require('./lib/dependency-checker');
+      const dep = checkDependencies(JOSH_ROOT, todo);
+      if (!dep.ok) {
+        const list = dep.blocked_by.map((b) => `${b.display_id}(${b.state})`).join(', ');
+        return errExit(`dependencies not yet done: ${list}`, 3);
+      }
+    }
+    // Phase 3: backpressure — advisory check at claim time so the agent learns early.
+    {
+      const { checkBackpressure } = require('./lib/backpressure');
+      const bp = checkBackpressure(JOSH_ROOT, todo);
+      if (!bp.ok && (bp.scope === 'global' || bp.scope === 'phase')) {
+        return errExit(`backpressure: ${bp.reason}`, 3);
+      }
+    }
     // Load brief (asserts manifest + source exist).
     let brief;
     try {
@@ -1412,6 +1456,23 @@ function cmdClaim(args) {
   }
 
   // Backward-compatible path: triaged → in_progress (no --agent).
+  // Phase 3: hard-dep enforcement + backpressure also apply here.
+  {
+    const located = locateTodo(idArg, ['triaged']);
+    if (located.error) return errExit(located.error, located.code);
+    const todo = readJson(located.path);
+    if (!todo) return errExit(`malformed todo at ${located.relative}`, 4);
+    const { checkDependencies } = require('./lib/dependency-checker');
+    const dep = checkDependencies(JOSH_ROOT, todo);
+    if (!dep.ok) {
+      const list = dep.blocked_by.map((b) => `${b.display_id}(${b.state})`).join(', ');
+      return errExit(`dependencies not yet done: ${list}`, 3);
+    }
+    const { checkBackpressure } = require('./lib/backpressure');
+    const bp = checkBackpressure(JOSH_ROOT, todo);
+    if (!bp.ok) return errExit(`backpressure: ${bp.reason}`, 3);
+  }
+
   const r = transitionTodo({
     srcStates: ['triaged'],
     dst: 'in_progress',
@@ -1510,6 +1571,51 @@ function cmdComplete(args) {
     });
   } catch (e) { /* non-fatal */ }
   log(r.id);
+  return 0;
+}
+
+function cmdHeartbeat(args) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        as:    { type: 'string' },
+        actor: { type: 'string' },
+      },
+      allowPositionals: true,
+      strict: true
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
+  const idArg = parsed.positionals[0];
+  if (!idArg) return errExit('heartbeat requires <todo-id>', 1);
+
+  const actor = resolveActor(parsed.values);
+  const allowed = ['claimed', 'planning', 'awaiting_approval', 'in_progress'];
+  const located = locateTodo(idArg, allowed);
+  if (located.error) return errExit(located.error, located.code);
+
+  const todo = readJson(located.path);
+  if (!todo) return errExit(`malformed todo at ${located.relative}`, 4);
+
+  const now = new Date().toISOString();
+  if (todo.claim) todo.claim.at = now;
+  todo.history = todo.history || [];
+  todo.history.push({ at: now, actor, event: 'heartbeat' });
+  writeJsonAtomic(located.path, todo);
+
+  // Per-todo events stream.
+  try {
+    ew.appendEvent(JOSH_ROOT, located.state, located.id, {
+      kind: 'heartbeat',
+      at: now,
+      actor,
+    });
+  } catch (e) { /* non-fatal */ }
+
+  appendAudit({ actor, action: 'todo.heartbeat', id: located.id, details: {} });
+  log(`heartbeat: ${located.id} at ${now}`);
   return 0;
 }
 
@@ -3222,6 +3328,7 @@ const COMMANDS = {
   tick: cmdTick,
   control: cmdControl,
   claim: cmdClaim,
+  heartbeat: cmdHeartbeat,
   complete: cmdComplete,
   fail: cmdFail,
   block: cmdBlock,

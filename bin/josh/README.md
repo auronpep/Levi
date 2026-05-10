@@ -177,6 +177,46 @@ Required H2s in any order: `Task ID`, `Files changed`, `Decision`, `Open blocker
 `josh tick` reads it from the `approved` directory and promotes the todo to `in_progress`. No model
 self-promotes a plan to execution.
 
+## Enforcement layer (Phase 3)
+
+`josh claim` and `josh tick` enforce four guardrails so a multi-task corpus can run unattended.
+
+### 1. Hard-dependency enforcement
+
+`josh claim <id>` (with or without `--agent`) refuses with exit code **3** when any todo in `meta.depends_on` (`kind: hard`) is not yet in `done/`. Error message lists the blocking display IDs and their current states.
+
+Soft deps (`kind: soft`) are advisory and are not checked.
+
+### 2. Backpressure caps
+
+Optional config at `~/.josh/orchestrator/backpressure.json`:
+
+```json
+{
+  "schema": 1,
+  "max_concurrent": 10,
+  "max_concurrent_per_phase": 5,
+  "max_concurrent_per_agent": 2
+}
+```
+
+Defaults apply when the file is absent. Caps are checked in two places:
+
+- `josh claim` (legacy and `--agent` paths) — exit **3** if any cap would be exceeded.
+- `josh tick`'s `approved → in_progress` promotion — throttled todos stay in `approved/` until the cap clears. Reported as `throttled=N` in the tick summary.
+
+### 3. Doom-loop detector
+
+A todo whose history contains ≥ 3 events of `event: failed` is considered doom-looped. `josh tick` scans `failed/` and `triaged/` for these and atomically renames them into `blocked/`, stamping `meta.blocked_reason = "doom-loop-detected:N"` and emitting a `failed` lifecycle event into `events.ndjson`. Reported as `doom_looped=N` in the tick summary when nonzero.
+
+### 4. Heartbeat
+
+```
+josh heartbeat <id> [--as <actor>]
+```
+
+Resets `meta.claim.at` to now (extending TTL by another full `claim.ttl_sec`) and appends both a history entry and a `kind: heartbeat` line to `events.ndjson`. Allowed source states: `claimed`, `planning`, `awaiting_approval`, `in_progress`. Anywhere else returns exit **1**.
+
 ## Operations: hybrid scheduler
 
 The orchestrator runs as **two cooperating schedulers**:
