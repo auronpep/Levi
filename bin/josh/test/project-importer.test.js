@@ -100,3 +100,19 @@ test('importProject: writes charter, todos, agent manifests under JOSH_ROOT', ()
 
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
+
+test('cmdInit creates the Phase 2A state directories', () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'josh-init-'));
+  const { execSync } = require('node:child_process');
+  const joshBin = path.resolve(__dirname, '..', 'josh.js');
+  execSync(`node "${joshBin}" init`, {
+    env: { ...process.env, JOSH_ROOT: tmpRoot },
+    stdio: 'pipe',
+  });
+  for (const state of ['claimed', 'planning', 'awaiting_approval', 'approved', 'rejected', 'revised']) {
+    const dir = path.join(tmpRoot, 'todo', state);
+    assert.equal(fs.existsSync(dir), true, `expected ${state} dir to exist`);
+    assert.equal(fs.statSync(dir).isDirectory(), true);
+  }
+  fs.rmSync(tmpRoot, { recursive: true, force: true });
+});
