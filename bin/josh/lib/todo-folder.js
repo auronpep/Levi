@@ -40,6 +40,69 @@ function readMeta(joshRoot, state, id) {
   try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { return null; }
 }
 
+function listTodosInState(joshRoot, state) {
+  const dir = path.join(joshRoot, 'todo', state);
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return []; }
+  const out = [];
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const meta = readMeta(joshRoot, state, e.name);
+    if (!meta) continue;
+    out.push({ ...meta, _state: state });
+  }
+  return out;
+}
+
+function findFolderById(joshRoot, idOrSuffix) {
+  if (!idOrSuffix) return null;
+  let exactHit = null;
+  let suffixHit = null;
+  for (const state of ALL_STATES) {
+    const dir = path.join(joshRoot, 'todo', state);
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { continue; }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      if (e.name === idOrSuffix) {
+        exactHit = { state, id: e.name };
+        break;
+      }
+      if (idOrSuffix.length >= 4 && idOrSuffix.length < 26 && e.name.endsWith(idOrSuffix)) {
+        if (!suffixHit) suffixHit = { state, id: e.name };
+        else suffixHit.collision = true;
+      }
+    }
+    if (exactHit) break;
+  }
+  return exactHit || suffixHit;
+}
+
+function transitionFolder(joshRoot, fromState, toState, id) {
+  const fromDir = folderPath(joshRoot, fromState, id);
+  const toDir = folderPath(joshRoot, toState, id);
+  if (!fs.existsSync(fromDir)) {
+    return { code: 3, error: `todo no longer in ${fromState} (race?)` };
+  }
+  if (fs.existsSync(toDir)) {
+    return { code: 4, error: `target already exists: ${toState}/${id}` };
+  }
+  // Ensure parent exists
+  fs.mkdirSync(path.dirname(toDir), { recursive: true });
+  try {
+    fs.renameSync(fromDir, toDir);
+  } catch (e) {
+    return { code: 4, error: `rename failed: ${e.message}` };
+  }
+  // Sync the one-line state file with the new parent dir name.
+  try {
+    fs.writeFileSync(path.join(toDir, 'state'), toState + '\n', 'utf8');
+  } catch (e) {
+    // non-fatal; meta.json is canonical
+  }
+  return { code: 0 };
+}
+
 module.exports = {
   ALL_STATES,
   folderPath,
@@ -47,4 +110,7 @@ module.exports = {
   ensureFolder,
   writeMeta,
   readMeta,
+  listTodosInState,
+  findFolderById,
+  transitionFolder,
 };
