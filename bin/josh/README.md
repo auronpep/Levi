@@ -99,6 +99,29 @@ josh review <review-id> --verdict request_changes \
   --as "codex:reviewer-session"
 ```
 
+## Project import
+
+Reflect a Markdown corpus (project + agents + tasks) into `~/.josh/`:
+
+```
+josh project import <corpus-path>          # one-shot import
+josh project status [--project <id>]       # render the daily-review template
+josh project sync   [--project <id>] [--dry-run]   # refresh entities from source
+```
+
+### Layout
+
+`josh project import` creates:
+- `~/.josh/projects/<ulid>/charter.json` — the project charter (one per import)
+- `~/.josh/agents/<id>/manifest.json` — one per agent (A01..A10, E00..E08)
+- `~/.josh/todo/triaged/<ulid>.json` — one per dispatch task
+
+The Markdown source is **not copied**. `manifest.json` and the todo files reference source paths and store SHA-256 hashes so `josh project sync` can detect changes.
+
+### Source-of-truth conflict order
+
+When a task or agent reference points to a path that no longer exists, `josh project sync` reports it as `missing` rather than auto-deleting. Removal is deliberate; no orphan cleanup unless explicitly requested.
+
 ## Atomic state transitions
 
 Each mutate op uses `fs.renameSync` between state directories as the lock primitive. The rename **is** the lock acquisition — only one agent succeeds, the other gets `ENOENT` and exits cleanly with code 3 (lock-conflict). Read-modify-write happens AFTER the rename, when the agent exclusively owns the file at the new path.

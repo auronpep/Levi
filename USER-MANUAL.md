@@ -688,6 +688,35 @@ josh version         (also: --version, -v)
 | `3` | Lock conflict (race-loss on atomic move; another agent got there first) |
 | `4` | Filesystem error (rename/write failed; usually surfaces a Node `e.code`) |
 
+### 7.14 Project import
+
+Reflect a Markdown corpus into `~/.josh/`. See `bin/josh/README.md#project-import` for layout details.
+
+#### `josh project import <corpus-path>`
+
+Reads:
+- `<corpus-path>/FOUR_DAY_FULL_PROJECT_DISPATCH/README.md` (charter)
+- `<corpus-path>/FOUR_DAY_FULL_PROJECT_DISPATCH/day_*/D*-*.md` (tasks)
+- `<corpus-path>/agent_orchestration/agents/AGENT_*.md` (agent briefs)
+
+Writes:
+- `~/.josh/projects/<project-ulid>/charter.json`
+- `~/.josh/agents/<agent-id>/manifest.json` (per agent)
+- `~/.josh/todo/triaged/<todo-ulid>.json` (per task)
+- `~/.josh/audit/<date>.jsonl` (project.imported / agent.imported / todo.imported events)
+
+Stdout: `imported project <ulid>` plus `todos: N` and `agents: N` counts.
+
+#### `josh project status [--project <id>]`
+
+Renders a daily-review template summarizing project progress: title, source, day-by-day done/total counts, and agent list. If only one project exists, `--project` is optional.
+
+#### `josh project sync [--project <id>] [--dry-run]`
+
+Re-parses all source paths referenced by the project's agents and todos, updates manifests/todos when source content changed, and writes `agent.synced` / `todo.synced` audit events. `--dry-run` reports what would change without writing.
+
+Reported counts: `changed` (source differs), `missing` (source path no longer exists — surfaced, not auto-cleaned), `updated` (writes performed).
+
 ---
 
 ## 8. The `~/.josh/` runtime
