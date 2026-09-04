@@ -3603,23 +3603,34 @@ Subcommands:
 
 function cmdMatrixStatus(args) {
   let parsed;
-  try { parsed = parseArgs({ args, options: { todo: { type: 'string' } }, allowPositionals: true, strict: true }); }
+  try { parsed = parseArgs({ args, options: { todo: { type: 'string' }, json: { type: 'boolean' } }, allowPositionals: true, strict: true }); }
   catch (e) { return errExit(e.message, 1); }
   const { listVerdicts, findTodoFolder } = require('./lib/verdict-envelope');
   const todoIds = parsed.values.todo
     ? [parsed.values.todo]
     : listInProgressIdsWithVerdicts();
-  if (todoIds.length === 0) { log('(no in-flight matrices)'); return 0; }
+  const rows = [];
   for (const tid of todoIds) {
     const folder = findTodoFolder(JOSH_ROOT, tid);
     if (!folder) continue;
     const meta = readJson(path.join(folder, 'meta.json')) || {};
     const cands = (meta.matrix_candidates || []).slice();
     const envelopes = listVerdicts(JOSH_ROOT, tid);
-    const winnerPath = path.join(folder, 'verdicts', 'winner.json');
-    const winner = fs.existsSync(winnerPath) ? '✓' : '—';
-    const display = meta.display_id || tid;
-    log(`  ${display}  cands=${cands.join(',') || '(unset)'}  envelopes=${envelopes.length}/${cands.length || '?'}  winner=${winner}`);
+    rows.push({
+      todo_id: tid,
+      display_id: meta.display_id || tid,
+      candidates: cands,
+      envelopes,
+      envelope_count: envelopes.length,
+      candidate_count: cands.length,
+      winner: fs.existsSync(path.join(folder, 'verdicts', 'winner.json')),
+    });
+  }
+
+  if (parsed.values.json) { log(JSON.stringify(rows, null, 2)); return 0; }
+  if (rows.length === 0) { log('(no in-flight matrices)'); return 0; }
+  for (const r of rows) {
+    log(`  ${r.display_id}  cands=${r.candidates.join(',') || '(unset)'}  envelopes=${r.envelope_count}/${r.candidate_count || '?'}  winner=${r.winner ? '✓' : '—'}`);
   }
   return 0;
 }
@@ -3637,9 +3648,18 @@ function listInProgressIdsWithVerdicts() {
   return out;
 }
 
-function cmdMatrixPending() {
+function cmdMatrixPending(args = []) {
+  // This took no parameters, so it never parsed its argv and every flag was
+  // silently ignored — `matrix pending --json` printed the human list and
+  // exited 0, which is the worst answer for a caller that asked for JSON.
+  let parsed;
+  try {
+    parsed = parseArgs({ args, options: { json: { type: 'boolean' } }, allowPositionals: false, strict: true });
+  } catch (e) { return errExit(e.message, 1); }
+
   const { listPendingAdjudications } = require('./lib/adjudicator');
   const list = listPendingAdjudications(JOSH_ROOT);
+  if (parsed.values.json) { log(JSON.stringify(list, null, 2)); return 0; }
   if (list.length === 0) { log('(no pending adjudications)'); return 0; }
   for (const a of list) {
     log(`  ${a.id}  todo=${a.todo_id}  candidates=${a.candidate_count}  queued=${a.queued_at}`);
@@ -3866,10 +3886,11 @@ function cmdEvolveStatus(args) {
 
 function cmdEvolveList(args) {
   let parsed;
-  try { parsed = parseArgs({ args, options: { state: { type: 'string' } }, allowPositionals: false, strict: true }); }
+  try { parsed = parseArgs({ args, options: { state: { type: 'string' }, json: { type: 'boolean' } }, allowPositionals: false, strict: true }); }
   catch (e) { return errExit(e.message, 1); }
   const { listEvolutions } = require('./lib/spec-evolver');
   const list = listEvolutions(JOSH_ROOT, { state: parsed.values.state });
+  if (parsed.values.json) { log(JSON.stringify(list, null, 2)); return 0; }
   if (list.length === 0) { log('(none)'); return 0; }
   for (const e of list) {
     log(`  ${e.evolve_id}  loc=${e.location}${e.halt_reason ? '  reason=' + e.halt_reason : ''}`);
