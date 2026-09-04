@@ -21,8 +21,13 @@ function extractFrontmatter(text) {
 function parseRequiredOrder(text) {
   const result = { after: [], before: [] };
   if (!text) return result;
-  const afterMatch = text.match(/after\s+(.+?)(?:,\s*before|$)/i);
-  const beforeMatch = text.match(/before\s+(.+)$/i);
+  // Both clauses stop at the other one. The `after` clause already did; `before`
+  // ran to end-of-line, so when an author wrote the clauses the other way round —
+  // "before `B`, after `A`" — the `before` capture swallowed the `after` clause
+  // too and `A` was recorded as both a prerequisite and something this task
+  // blocks. A contradictory edge, from a line that reads perfectly well.
+  const afterMatch = text.match(/after\s+(.+?)(?:,\s*before\b|$)/i);
+  const beforeMatch = text.match(/before\s+(.+?)(?:,\s*after\b|$)/i);
   const extractIds = (s) => {
     if (!s) return [];
     const ids = [];
