@@ -8,6 +8,18 @@ const { listServers } = require('./mcp-registry');
 const A2A_VERSION = '1.0.0';
 const STOP_FLAG = (joshRoot) => path.join(joshRoot, 'a2a', '.stop');
 
+// Every id that arrives over HTTP becomes a path segment under JOSH_ROOT, so it
+// has to be a single segment and nothing else. `path.join` resolves `..` rather
+// than rejecting it, which means an unvalidated id walks straight out of the
+// root and writes wherever the josh user can write. Agent ids are lowercase
+// words (`claude`, `codex`), todo ids are ULIDs - neither needs a dot, a slash
+// or a backslash, so the safe set is exactly the set already in use.
+const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+function isSafeId(v) {
+  return typeof v === 'string' && ID_RE.test(v);
+}
+
 function readJson(p) {
   if (!fs.existsSync(p)) return null;
   try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { return null; }
@@ -110,6 +122,7 @@ function makeApp(joshRoot) {
       if (route === 'POST /agents/register') {
         const body = await readBody(req);
         if (!body || !body.id) return sendJson(res, 400, { error: 'id required' });
+        if (!isSafeId(body.id)) return sendJson(res, 400, { error: 'id must match [A-Za-z0-9_-]{1,64}' });
         const dir = path.join(joshRoot, 'agents', body.id);
         fs.mkdirSync(dir, { recursive: true });
         let manifest = readJson(path.join(dir, 'manifest.json')) || { schema: 1, id: body.id };
@@ -128,6 +141,8 @@ function makeApp(joshRoot) {
         const body = await readBody(req);
         const { todo_id, agent_id } = body;
         if (!todo_id || !agent_id) return sendJson(res, 400, { error: 'todo_id and agent_id required' });
+        if (!isSafeId(todo_id)) return sendJson(res, 400, { error: 'todo_id must match [A-Za-z0-9_-]{1,64}' });
+        if (!isSafeId(agent_id)) return sendJson(res, 400, { error: 'agent_id must match [A-Za-z0-9_-]{1,64}' });
         const located = findTodoFolder(joshRoot, todo_id);
         if (!located) return sendJson(res, 404, { error: `todo ${todo_id} not found` });
         if (located.state !== 'triaged') return sendJson(res, 409, { error: `todo ${todo_id} is in state '${located.state}', expected 'triaged'` });
@@ -207,4 +222,4 @@ function requestStop(joshRoot) {
   fs.writeFileSync(STOP_FLAG(joshRoot), new Date().toISOString());
 }
 
-module.exports = { A2A_VERSION, makeApp, startServer, requestStop, STOP_FLAG, guardRequest, hostIsLoopback };
+module.exports = { A2A_VERSION, makeApp, startServer, requestStop, STOP_FLAG, isSafeId };
