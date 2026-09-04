@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { resolveSourcePath } = require('./agent-brief');
 
 const V1_AGENTS = ['A01', 'E00', 'E08'];
 const DEFAULT_MAX_ROUNDS = 5;
@@ -53,10 +54,11 @@ function enqueueEvolution(joshRoot, agentId, opts = {}) {
     throw new Error(`agent ${agentId} not in v1 evolve list (${V1_AGENTS.join(',')}); pass {allowAny: true} to override`);
   }
   const manifest = readManifest(joshRoot, agentId);
-  if (!manifest.source_path || !fs.existsSync(manifest.source_path)) {
+  const briefPath = resolveSourcePath(joshRoot, manifest.source_path);
+  if (!briefPath || !fs.existsSync(briefPath)) {
     throw new Error(`agent ${agentId} source brief missing`);
   }
-  const briefV1 = fs.readFileSync(manifest.source_path, 'utf8');
+  const briefV1 = fs.readFileSync(briefPath, 'utf8');
   const evolveId = 'evolve-' + agentId + '-' + ulid();
   const dir = evolveDir(joshRoot, agentId, evolveId);
   fs.mkdirSync(dir, { recursive: true });
@@ -267,10 +269,15 @@ function applyApproval(joshRoot, evolveId, opts = {}) {
 
   const manifest = readManifest(joshRoot, agentId);
   // Backup current brief into approvals/<evolveId>/before-overwritten.md.
-  if (manifest.source_path && fs.existsSync(manifest.source_path)) {
-    fs.writeFileSync(path.join(approvalDir, 'before-overwritten.md'), fs.readFileSync(manifest.source_path));
+  // Resolved against JOSH_ROOT so approve overwrites the same file the evolve
+  // round read, not whatever sits at that relative path in the current
+  // directory.
+  const briefPath = resolveSourcePath(joshRoot, manifest.source_path);
+  if (!briefPath) throw new Error(`agent ${agentId} manifest has no source_path`);
+  if (fs.existsSync(briefPath)) {
+    fs.writeFileSync(path.join(approvalDir, 'before-overwritten.md'), fs.readFileSync(briefPath));
   }
-  fs.writeFileSync(manifest.source_path, after);
+  fs.writeFileSync(briefPath, after);
   manifest.version = (manifest.version || 1) + 1;
   writeManifest(joshRoot, agentId, manifest);
 
