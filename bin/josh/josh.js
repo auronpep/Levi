@@ -167,7 +167,15 @@ function emptyStatus() {
 // ─── Helpers: age, find by id ────────────────────────────────────────────────
 
 function formatAge(isoString) {
-  const d = Date.now() - new Date(isoString).getTime();
+  // An artifact with no usable timestamp has no age. `new Date(undefined)` is an
+  // Invalid Date, so the arithmetic produced NaN and the listings printed `NaNd`;
+  // `new Date(null)` is worse — it is the epoch, so a missing timestamp rendered
+  // as a confident `20789d` instead of announcing itself. Date.parse gives NaN
+  // for both, and the em dash matches how `josh status` already shows an absent
+  // value.
+  const t = Date.parse(isoString);
+  if (!Number.isFinite(t)) return '—';
+  const d = Date.now() - t;
   const sec = Math.max(0, Math.floor(d / 1000));
   if (sec < 60) return `${sec}s`;
   const min = Math.floor(sec / 60);
