@@ -111,14 +111,29 @@ function summarize(joshRoot, opts = {}) {
     return out;
   };
 
+  // `earliest` / `latest` are a min and a max, not the first and last rows.
+  // The ledger is append-ordered by write time, which is not timestamp order
+  // once runs finish concurrently, get retried, or are backfilled - taking
+  // the ends of the array can report an `earliest` that is later than the
+  // `latest`. Rows whose `at` will not parse are ignored for the range but
+  // still counted everywhere else.
+  let earliest = null;
+  let latest = null;
+  for (const e of entries) {
+    const t = Date.parse(e.at);
+    if (!Number.isFinite(t)) continue;
+    if (earliest === null || t < earliest.t) earliest = { t, at: e.at };
+    if (latest === null || t > latest.t) latest = { t, at: e.at };
+  }
+
   return {
     run_count: entries.length,
     total,
     by_agent: groupBy('agent_id'),
     by_model: groupBy('model'),
     by_phase: groupBy('phase'),
-    earliest: entries.length ? entries[0].at : null,
-    latest: entries.length ? entries[entries.length - 1].at : null,
+    earliest: earliest ? earliest.at : null,
+    latest: latest ? latest.at : null,
   };
 }
 
