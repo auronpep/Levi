@@ -28,8 +28,20 @@ function predictTokens(agent, todo) {
   return { tokens_in, tokens_out, model: modelOf(agent) };
 }
 
+const FALLBACK_MODEL = 'sonnet';
+
+// TIER_COSTS is a plain object, so it inherits from Object.prototype and a
+// bare `TIER_COSTS[model]` lookup finds inherited members. `constructor`,
+// `toString`, `valueOf` and `hasOwnProperty` are all truthy, so the `||`
+// fallback never fires for them and the tier ends up as a function with no
+// `in_per_1m` - producing NaN, which then propagates through every total in
+// predictCost. Own-property lookup makes the fallback actually reachable.
+function tierFor(model) {
+  return Object.hasOwn(TIER_COSTS, model) ? model : FALLBACK_MODEL;
+}
+
 function usdFor(tokens_in, tokens_out, model) {
-  const tier = TIER_COSTS[model] || TIER_COSTS.sonnet;
+  const tier = TIER_COSTS[tierFor(model)];
   return (tokens_in * tier.in_per_1m + tokens_out * tier.out_per_1m) / 1e6;
 }
 
@@ -41,6 +53,10 @@ function predictCost(candidates, todo) {
       tokens_in: t.tokens_in,
       tokens_out: t.tokens_out,
       model: t.model,
+      // Which tier the number was actually priced at. For a model with no tier
+      // this differs from `model`, so a fallback price is visible instead of
+      // being reported under the requested model's name.
+      priced_as: tierFor(t.model),
       usd: usdFor(t.tokens_in, t.tokens_out, t.model),
     };
   });
@@ -73,6 +89,9 @@ function enforceCeiling(candidates, todo, ceiling = MAX_TOKENS_PER_VERDICT) {
 module.exports = {
   TIER_COSTS,
   MAX_TOKENS_PER_VERDICT,
+  FALLBACK_MODEL,
+  tierFor,
+  usdFor,
   predictTokens,
   predictCost,
   enforceCeiling,
