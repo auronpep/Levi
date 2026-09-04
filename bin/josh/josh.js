@@ -2639,7 +2639,8 @@ function cmdLockRelease(args) {
       args,
       options: {
         as:    { type: 'string' },
-        actor: { type: 'string' }
+        actor: { type: 'string' },
+        force: { type: 'boolean' }
       },
       allowPositionals: true,
       strict: true
@@ -2658,6 +2659,21 @@ function cmdLockRelease(args) {
   const existing = readJson(lockFile);
   const actor = resolveActor(parsed.values);
 
+  // A lock only excludes anyone if the holder is the one who can drop it.
+  // `acquire` already refuses a second holder with exit 3; release did not check
+  // at all, so any agent could free a resource another agent was working in and
+  // then take it — the acquire guard was the only thing standing in the way, and
+  // one release call walked around it.
+  //
+  // `--force` remains for the stuck-holder case, and it is recorded in the audit
+  // event so a stolen lock is visible after the fact.
+  const holder = existing && existing.holder;
+  if (holder && holder !== actor && !parsed.values.force) {
+    err(`error: lock '${resource}' is held by ${holder}, not ${actor}. `
+      + `Use --force to release another holder's lock.`);
+    return 3;
+  }
+
   try { fs.unlinkSync(lockFile); }
   catch (e) {
     if (e.code === 'ENOENT') {
@@ -2672,7 +2688,11 @@ function cmdLockRelease(args) {
     actor,
     action: 'lock.released',
     id: resource,
-    details: { previous_holder: existing?.holder || null, acquired_at: existing?.acquired_at || null }
+    details: {
+      previous_holder: existing?.holder || null,
+      acquired_at: existing?.acquired_at || null,
+      forced: !!parsed.values.force && !!holder && holder !== actor
+    }
   });
 
   log(resource);
@@ -4498,7 +4518,7 @@ function cmdHelp() {
   log(``);
   log(`locks (general resource locks):`);
   log(`  lock acquire <resource> [--ttl 1h] [--reason "..."]   acquire a lock`);
-  log(`  lock release <resource>                                release a lock`);
+  log(`  lock release <resource> [--force]                      release a lock you hold (--force: any holder)`);
   log(`  lock list [--json]                                     list held locks`);
   log(`  list locks                    alias for lock list`);
   log(``);
