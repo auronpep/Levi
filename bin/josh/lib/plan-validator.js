@@ -33,12 +33,36 @@ function parseFrontmatter(text) {
 
 function extractSections(body) {
   // Each H2 heading starts a section. Returns [{title, body}] in order.
+  //
+  // Headings inside fenced code blocks are NOT headings. A plan's
+  // "Step-by-step change list" is exactly where diffs, shell snippets and
+  // quoted markdown live, and a `## ...` line inside a fence used to open a
+  // phantom section: it truncated the real section's body, and if the fenced
+  // text happened to name a required section it produced a duplicate and the
+  // plan was rejected for being "out of order" while in perfect order.
   const sections = [];
-  const re = /^##\s+(.+)$/gm;
   const matches = [];
-  let m;
-  while ((m = re.exec(body)) !== null) {
-    matches.push({ title: m[1].trim(), start: m.index, contentStart: m.index + m[0].length });
+  let offset = 0;
+  let fenceChar = null;
+  let fenceLen = 0;
+
+  for (const line of body.split('\n')) {
+    const fence = line.trim().match(/^(`{3,}|~{3,})/);
+    if (fence) {
+      const ch = fence[1][0];
+      const len = fence[1].length;
+      if (fenceChar === null) {
+        fenceChar = ch;
+        fenceLen = len;
+      } else if (ch === fenceChar && len >= fenceLen) {
+        fenceChar = null;
+        fenceLen = 0;
+      }
+    } else if (fenceChar === null) {
+      const h = line.match(/^##\s+(.+)$/);
+      if (h) matches.push({ title: h[1].trim(), start: offset, contentStart: offset + line.length });
+    }
+    offset += line.length + 1; // +1 for the newline consumed by split
   }
   for (let i = 0; i < matches.length; i++) {
     const cur = matches[i];
