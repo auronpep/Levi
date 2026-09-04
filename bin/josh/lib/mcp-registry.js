@@ -7,11 +7,37 @@ function registryPath(joshRoot) {
   return path.join(joshRoot, 'mcp', 'registry.json');
 }
 
+// A corrupt registry must NOT be reported as an empty registry. Every mutating
+// path (registerServer / unregisterServer) does read → modify → write, so
+// swallowing a parse error here turned "the file is damaged" into "the file
+// contains nothing", and the very next write replaced every registered server
+// with the single entry being added.
 function readRegistry(joshRoot) {
   const p = registryPath(joshRoot);
   if (!fs.existsSync(p)) return { schema: 1, servers: [] };
-  try { return JSON.parse(fs.readFileSync(p, 'utf8')); }
-  catch (e) { return { schema: 1, servers: [] }; }
+
+  let raw;
+  try { raw = fs.readFileSync(p, 'utf8'); }
+  catch (e) { throw new Error(`mcp registry unreadable at ${p}: ${e.message}`); }
+
+  let parsed;
+  try { parsed = JSON.parse(raw); }
+  catch (e) {
+    throw new Error(
+      `mcp registry is corrupt at ${p}: ${e.message}. ` +
+      `Refusing to continue so the existing entries are not overwritten — ` +
+      `repair the file or move it aside to start a fresh registry.`
+    );
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`mcp registry at ${p} is not a JSON object. Repair it or move it aside.`);
+  }
+  if (parsed.servers !== undefined && !Array.isArray(parsed.servers)) {
+    throw new Error(`mcp registry at ${p} has a non-array "servers" field. Repair it or move it aside.`);
+  }
+  if (!Array.isArray(parsed.servers)) parsed.servers = [];
+  return parsed;
 }
 
 function writeRegistry(joshRoot, reg) {
