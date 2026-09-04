@@ -4561,6 +4561,20 @@ function cmdHelp() {
   log(`  set-interval <seconds>        change orchestrator heartbeat interval`);
   log(`  reorder <todo-id> --priority pX   change a live todo's priority`);
   log(``);
+  // Exit codes belong in --help, not only in a source comment. This CLI exists
+  // to be driven by agents and cron, and the codes are the only way a caller can
+  // tell "this todo does not exist" from "someone else holds it" from "the disk
+  // failed" — which is the difference between giving up, retrying later, and
+  // escalating. They are used consistently throughout (1 validation, 2 not-found,
+  // 3 conflict, 4 fs-error), so callers can rely on them.
+  log(``);
+  log(`exit codes:`);
+  log(`  0  success`);
+  log(`  1  validation — bad arguments, wrong state, or a refused request`);
+  log(`  2  not found — no such todo, handoff, approval, review, or lock`);
+  log(`  3  conflict — already claimed, held by another actor, or a lost race`);
+  log(`  4  filesystem error — the operation could not be completed on disk`);
+  log(``);
   log(`spec: ${path.join(JOSH_ROOT, 'README.md')}`);
   log(`env:  JOSH_ROOT=${JOSH_ROOT}`);
   return 0;
