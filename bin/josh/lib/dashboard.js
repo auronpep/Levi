@@ -99,10 +99,16 @@ function renderDashboard(joshRoot, opts = {}) {
   lines.push('');
 
   // 5. Drift alerts
-  const alerts = computeDriftAlerts(joshRoot, { window: opts.driftWindow || 10, threshold: opts.driftThreshold || 3 });
+  // Report the thresholds that were actually applied. The empty-state line used
+  // to hard-code "≥3 ... last 10" regardless of --drift-threshold/--drift-window,
+  // so a dashboard run with different numbers stated a conclusion about a check
+  // it had not performed.
+  const driftWindow = opts.driftWindow || 10;
+  const driftThreshold = opts.driftThreshold || 3;
+  const alerts = computeDriftAlerts(joshRoot, { window: driftWindow, threshold: driftThreshold });
   lines.push('## Drift alerts');
   if (alerts.length === 0) {
-    lines.push('  (none — no agent has ≥3 disagreements in last 10 matrix runs)');
+    lines.push(`  (none — no agent has ≥${driftThreshold} disagreements in last ${driftWindow} matrix runs)`);
   } else {
     for (const a of alerts) {
       lines.push(`  ⚠️  ${a.agent} on ${a.archetype}: ${a.disagreements}/${a.runs_in_window} disagreements (rate ${a.rate})`);
