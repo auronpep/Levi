@@ -8,14 +8,34 @@ function sprintsDir(joshRoot) {
   return path.join(joshRoot, 'sprints');
 }
 
+// Seconds are part of the stamp on purpose. A snapshot is a point in a time
+// series, and two captures a few seconds apart - before and after an operation,
+// or a scripted loop - are exactly the pair an operator wants to compare. At
+// minute resolution the second one landed on the first one's filename and the
+// earlier capture was overwritten with no error. The digits stay fixed-width so
+// the names still sort chronologically as plain strings.
 function ts() {
-  return new Date().toISOString().slice(0, 16).replace(/[:T-]/g, '').replace(/(\d{4})(\d{2})(\d{2})(\d{4})/, '$1-$2-$3-$4');
+  return new Date().toISOString().slice(0, 19).replace(/[:T-]/g, '').replace(/(\d{4})(\d{2})(\d{2})(\d{6})/, '$1-$2-$3-$4');
+}
+
+// Last line of defence for two captures inside the same second: never hand back
+// a path that already holds a snapshot. Same shape as archive() in
+// sync-conflict.js - probe suffixes until one is free.
+function freePath(basePath) {
+  if (!fs.existsSync(basePath)) return basePath;
+  const dir = path.dirname(basePath);
+  const ext = path.extname(basePath);
+  const stem = path.basename(basePath, ext);
+  for (let i = 2; ; i++) {
+    const candidate = path.join(dir, `${stem}-${i}${ext}`);
+    if (!fs.existsSync(candidate)) return candidate;
+  }
 }
 
 function snapshotPath(joshRoot, label) {
   const t = ts();
   const tag = label ? `-${label}` : '';
-  return path.join(sprintsDir(joshRoot), `${t}${tag}.json`);
+  return freePath(path.join(sprintsDir(joshRoot), `${t}${tag}.json`));
 }
 
 function countDir(p) {
@@ -74,7 +94,9 @@ function snapshot(joshRoot, opts = {}) {
     host: opts.host || require('./host').currentHost(),
   };
   const p = snapshotPath(joshRoot, opts.label);
-  const tmp = p + '.tmp';
+  // The temp name carries the pid so two processes capturing at the same instant
+  // cannot interleave their writes into one shared scratch file.
+  const tmp = `${p}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(snap, null, 2) + '\n');
   fs.renameSync(tmp, p);
   return { path: p, snapshot: snap };
