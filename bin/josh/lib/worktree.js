@@ -2,7 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { execSync } = require('node:child_process');
+const { execFileSync } = require('node:child_process');
 
 const ALL_LIVE_STATES = [
   'incoming', 'triaged', 'claimed', 'planning', 'awaiting_approval',
@@ -23,8 +23,19 @@ function shortId(todoId) {
   return todoId.slice(-6).toLowerCase();
 }
 
+// execFileSync, not execSync: no shell is involved, so every argument is passed
+// to git as a literal argv entry. Branch names and paths reach git as data and
+// cannot be reinterpreted as commands.
+//
+// `args` is an array. Building a command string and interpolating a branch name
+// into it meant `baseBranch` - which comes from the todo's `meta.context.branch`
+// and so can arrive on a synced or imported todo rather than being typed by the
+// operator - was executed by the shell.
 function git(repo, args, opts = {}) {
-  return execSync(`git -C "${repo}" ${args}`, { stdio: opts.stdio || 'pipe', encoding: 'utf8' });
+  return execFileSync('git', ['-C', repo, ...args], {
+    stdio: opts.stdio || 'pipe',
+    encoding: 'utf8',
+  });
 }
 
 function createWorktree(joshRoot, todoId, opts = {}) {
@@ -42,7 +53,7 @@ function createWorktree(joshRoot, todoId, opts = {}) {
   }
   const branch = `agent/${shortId(todoId)}${suffix === '' ? '' : '-' + suffix}`;
   // git worktree add -b <branch> <path> <baseBranch>
-  git(baseRepo, `worktree add -b ${branch} "${wtPath}" ${baseBranch}`);
+  git(baseRepo, ['worktree', 'add', '-b', branch, wtPath, baseBranch]);
   return { path: wtPath, branch, suffix: suffix || '' };
 }
 
@@ -72,7 +83,7 @@ function listWorktrees(joshRoot, todoId) {
     const wtPath = path.join(found.folder, e.name);
     const suffix = e.name === 'worktree' ? '' : e.name.replace(/^worktree-/, '');
     let branch = null;
-    try { branch = git(wtPath, 'rev-parse --abbrev-ref HEAD').trim(); } catch (_) {}
+    try { branch = git(wtPath, ['rev-parse', '--abbrev-ref', 'HEAD']).trim(); } catch (_) {}
     byName.set(e.name, { path: wtPath, branch, suffix });
   }
   return Array.from(byName.values());
@@ -92,7 +103,7 @@ function removeWorktree(joshRoot, todoId, opts = {}) {
     // if the worktree dir hasn't been moved since `git worktree add`).
     if (!baseRepo) {
       try {
-        const gitDirPath = git(wt.path, 'rev-parse --git-common-dir').trim();
+        const gitDirPath = git(wt.path, ['rev-parse', '--git-common-dir']).trim();
         baseRepo = path.resolve(wt.path, gitDirPath, '..');
       } catch (e) { /* moved worktrees can't resolve this */ }
     }
@@ -100,11 +111,11 @@ function removeWorktree(joshRoot, todoId, opts = {}) {
     if (baseRepo) {
       // Try the clean path first (works only if git's worktree registry still
       // matches the current path).
-      try { git(baseRepo, `worktree remove --force "${wt.path}"`); } catch (e) { /* often fails after rename */ }
+      try { git(baseRepo, ['worktree', 'remove', '--force', wt.path]); } catch (e) { /* often fails after rename */ }
       // Always prune to clean any stale registry entries pointing at moved paths.
-      try { git(baseRepo, `worktree prune`); } catch (e) {}
+      try { git(baseRepo, ['worktree', 'prune']); } catch (e) {}
       if (branch && branch !== 'HEAD') {
-        try { git(baseRepo, `branch -D ${branch}`); } catch (e) {}
+        try { git(baseRepo, ['branch', '-D', branch]); } catch (e) {}
       }
     }
     if (fs.existsSync(wt.path)) {
