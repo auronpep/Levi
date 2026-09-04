@@ -7,9 +7,21 @@ function ledgerPath(joshRoot, yyyymm) {
   return path.join(joshRoot, 'cost', `${yyyymm}.jsonl`);
 }
 
+function monthOf(date) {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
 function currentMonth() {
-  const d = new Date();
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+  return monthOf(new Date());
+}
+
+// The `YYYY-MM.jsonl` files partition entries by when the work happened, so
+// the file an entry lands in has to come from the entry's own timestamp - not
+// from the clock at write time. Unparseable stamps fall back to the current
+// month so a bad `at` can never lose the row.
+function monthForEntry(at) {
+  const d = new Date(at);
+  return Number.isFinite(d.getTime()) ? monthOf(d) : currentMonth();
 }
 
 function appendCost(joshRoot, entry) {
@@ -26,7 +38,7 @@ function appendCost(joshRoot, entry) {
     phase: entry.phase != null ? entry.phase : null,
     sentinel: entry.sentinel || null,
   };
-  const p = ledgerPath(joshRoot, currentMonth());
+  const p = ledgerPath(joshRoot, monthForEntry(e.at));
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.appendFileSync(p, JSON.stringify(e) + '\n');
   return p;
@@ -94,4 +106,4 @@ function summarize(joshRoot, opts = {}) {
   };
 }
 
-module.exports = { appendCost, readCostsForMonth, listMonths, summarize, ledgerPath, currentMonth };
+module.exports = { appendCost, readCostsForMonth, listMonths, summarize, ledgerPath, currentMonth, monthForEntry };
