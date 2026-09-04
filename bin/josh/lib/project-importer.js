@@ -235,10 +235,21 @@ function importProject(corpusPath, opts = {}) {
       phase: task.phase,
       phase_name: task.phase_name,
       primary_role: task.primary_role,
-      depends_on: task.depends_on_display_ids
-        .map((d) => taskUlids[d])
-        .filter(Boolean)
-        .map((id) => ({ id, kind: 'hard' })),
+      // A display_id with no imported task behind it must NOT be dropped.
+      // `.filter(Boolean)` turned "I cannot resolve this ordering constraint"
+      // into "there is no ordering constraint", so a task whose brief said
+      // `Required order: after D1-002` became immediately claimable.
+      //
+      // Keeping the display_id as the lookup id means the dependency stays and
+      // blocks: dependency-checker finds no folder by that name and reports it
+      // as `missing`. A later `josh project sync` rewrites depends_on from
+      // depends_on_display_ids, so it resolves to the real ULID on its own once
+      // the task is imported.
+      depends_on: task.depends_on_display_ids.map((d) => (
+        taskUlids[d]
+          ? { id: taskUlids[d], kind: 'hard' }
+          : { id: d, display_id: d, kind: 'hard', unresolved: true }
+      )),
       depends_on_display_ids: task.depends_on_display_ids,
       blocks_display_ids: task.blocks_display_ids,
       parallel_safety: task.parallel_safety,

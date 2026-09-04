@@ -139,10 +139,14 @@ function applySync(projectId, opts = {}) {
       todo.phase_name = fresh.phase_name;
       todo.primary_role = fresh.primary_role;
       todo.depends_on_display_ids = fresh.depends_on_display_ids;
-      todo.depends_on = fresh.depends_on_display_ids
-        .map((d) => displayToUlid[d])
-        .filter(Boolean)
-        .map((id) => ({ id, kind: 'hard' }));
+      // Same rule as the importer: an unresolvable display_id keeps its
+      // constraint rather than losing it. Once the referenced task exists, the
+      // next sync resolves it to a real ULID.
+      todo.depends_on = fresh.depends_on_display_ids.map((d) => (
+        displayToUlid[d]
+          ? { id: displayToUlid[d], kind: 'hard' }
+          : { id: d, display_id: d, kind: 'hard', unresolved: true }
+      ));
       todo.blocks_display_ids = fresh.blocks_display_ids;
       todo.parallel_safety = fresh.parallel_safety;
       todo.synced_at = now;
