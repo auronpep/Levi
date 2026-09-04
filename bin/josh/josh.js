@@ -119,11 +119,23 @@ function ulid(now = Date.now()) {
 function appendAudit(event) {
   try {
     const date = new Date().toISOString().slice(0, 10);
-    const auditFile = path.join(JOSH_ROOT, 'audit', `${date}.jsonl`);
+    const auditDir = path.join(JOSH_ROOT, 'audit');
+    const auditFile = path.join(auditDir, `${date}.jsonl`);
+    // Create the directory rather than losing the event when it is absent.
+    // `josh init` makes audit/, but a root can outlive that: a tree created
+    // before audit/ was in SUBDIRS, a partially synced root, or a cleanup that
+    // removed an empty directory. Every such command then succeeded while its
+    // audit line went nowhere.
+    //
+    // The other two audit writers already do this — appendChainedAudit in
+    // lib/audit-chain.js and appendAuditEvent in lib/project-importer.js — so
+    // this is the odd one out, and it is the one nearly every command uses.
+    fs.mkdirSync(auditDir, { recursive: true });
     const line = JSON.stringify({ at: new Date().toISOString(), ...event }) + '\n';
     fs.appendFileSync(auditFile, line, 'utf8');
   } catch (e) {
-    // Don't fail the operation if audit write breaks.
+    // Still don't fail the operation if the audit write breaks for another
+    // reason (read-only mount, full disk) — but say so loudly.
     err(`warn: audit write failed: ${e.message}`);
   }
 }
