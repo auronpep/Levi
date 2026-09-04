@@ -133,10 +133,14 @@ function loadAgentKeys(joshRoot, agentId) {
 function agentBriefHash(joshRoot, agentId) {
   const manifest = readManifest(joshRoot, agentId);
   if (!manifest.source_path) throw new Error(`agent ${agentId} manifest has no source_path`);
-  if (!fs.existsSync(manifest.source_path)) {
-    throw new Error(`source brief missing: ${manifest.source_path}`);
+  // Anchor on JOSH_ROOT: an integrity hash that changes with the caller's
+  // working directory is not an integrity hash.
+  const { resolveSourcePath } = require('./agent-brief');
+  const resolved = resolveSourcePath(joshRoot, manifest.source_path);
+  if (!fs.existsSync(resolved)) {
+    throw new Error(`source brief missing: ${resolved}`);
   }
-  return crypto.createHash('sha256').update(fs.readFileSync(manifest.source_path)).digest('hex');
+  return crypto.createHash('sha256').update(fs.readFileSync(resolved)).digest('hex');
 }
 
 module.exports = {
