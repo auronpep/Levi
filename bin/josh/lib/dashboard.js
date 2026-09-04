@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { summarize } = require('./cost-ledger');
 const { computeDriftAlerts } = require('./drift-alerts');
+const { ALL_STATES } = require('./todo-folder');
 
 function countDir(p) {
   try {
@@ -35,7 +36,11 @@ function pad(s, n) { return String(s).padEnd(n); }
 
 function renderDashboard(joshRoot, opts = {}) {
   const lines = [];
-  const queueStates = ['incoming', 'triaged', 'claimed', 'planning', 'awaiting_approval', 'approved', 'in_progress', 'done', 'blocked', 'failed', 'cancelled'];
+  // Reuse todo-folder's ALL_STATES rather than keeping a private copy. The copy
+  // that used to live here had drifted: it listed 11 of the 13 states, so todos
+  // sitting in `rejected` or `revised` were absent from the dashboard entirely -
+  // not shown as zero, simply never looked at.
+  const queueStates = ALL_STATES;
   lines.push(`josh dashboard — ${joshRoot}`);
   lines.push(`generated: ${new Date().toISOString()}`);
   lines.push('');
