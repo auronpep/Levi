@@ -38,8 +38,24 @@ function verifyDelegation(vcJws, opts = {}) {
   let parts;
   try { parts = require('./jws').decodeJwsParts(vcJws); }
   catch (e) { return { valid: false, reason: e.message }; }
-  // Verify signature against the kid (parent DID) in the header.
+  // The signing key is derived from the token's own `kid`, and a `did:key:z...`
+  // DID *contains* the public key. So the signature check alone proves only
+  // "whoever wrote this token also signed it" - self-attestation, not
+  // authorisation. Anyone can generate a keypair, name themselves in `kid`, and
+  // mint a VC for any scope they like.
+  //
+  // `opts.trustedDids` is the anchor that turns the signature into evidence:
+  // the issuer must be a DID the caller already knows (the `did` fields of the
+  // registered agent manifests). Any caller making an authorisation decision on
+  // a delegation MUST pass it - without it this function answers "is this
+  // internally consistent", not "may the bearer do this".
   const parentDid = parts.header.kid;
+  if (opts.trustedDids !== undefined) {
+    const trusted = Array.isArray(opts.trustedDids) ? opts.trustedDids : [];
+    if (!trusted.includes(parentDid)) {
+      return { valid: false, reason: `untrusted issuer: ${parentDid}`, parts };
+    }
+  }
   let parentPub;
   try { parentPub = didToPublicKey(parentDid); }
   catch (e) { return { valid: false, reason: e.message }; }
@@ -49,6 +65,15 @@ function verifyDelegation(vcJws, opts = {}) {
   // Required fields
   for (const f of ['sub', 'act', 'delegate_to', 'scope', 'expires_at']) {
     if (p[f] == null) return { valid: false, reason: `missing field: ${f}`, parts: v.parts };
+  }
+  // `act` is the DID the token claims to be acting as. It must be the DID that
+  // actually signed it, or a token signed by one key could name a different,
+  // trusted agent in `act` and any caller reading `payload.act` as the actor
+  // would be reading the attacker's assertion rather than a verified fact.
+  // issueDelegation always sets both from the same key, so this only rejects
+  // tokens that were assembled by hand.
+  if (p.act !== parentDid) {
+    return { valid: false, reason: `act (${p.act}) does not match signing key (${parentDid})`, parts: v.parts };
   }
   // Expiry check
   const exp = Date.parse(p.expires_at);
