@@ -74,6 +74,15 @@ const HANDOFF_KINDS = ['request', 'answer', 'note'];
 
 const VALID_PRIORITIES = ['p0', 'p1', 'p2', 'p3'];
 
+// A todo is terminal once it is done, failed or cancelled — there is nothing
+// left to stop. Everything else is live work, and `josh cancel` documents itself
+// as "any live state → cancelled".
+const TERMINAL_TODO_STATES = ['done', 'failed', 'cancelled'];
+const LIVE_TODO_STATES = [
+  'incoming', 'triaged', 'claimed', 'planning', 'awaiting_approval',
+  'approved', 'rejected', 'revised', 'in_progress', 'blocked'
+];
+
 // ─── Logging ─────────────────────────────────────────────────────────────────
 
 function log(line) { process.stdout.write(line + '\n'); }
@@ -1988,7 +1997,17 @@ function cmdCancel(args) {
   const actor = resolveActor(parsed.values);
 
   const r = transitionTodo({
-    srcStates: ['incoming', 'triaged', 'in_progress', 'blocked'],
+    // `cancel` promised "any live state" but accepted four of the ten. The six it
+    // refused are the entire Phase 2A lifecycle — claimed, planning,
+    // awaiting_approval, approved, rejected, revised — so a todo an agent had
+    // claimed and abandoned, or one sitting on a human approval that will never
+    // come, could not be cancelled at all. `fail` and `unblock` do not accept
+    // those states either, so there was no supported way out of them except
+    // forward, and the only recourse was editing the tree by hand.
+    //
+    // The update below already clears `claim`, so cancelling from a claimed
+    // state releases the agent's hold correctly.
+    srcStates: LIVE_TODO_STATES,
     dst: 'cancelled',
     idOrSuffix: idArg,
     actor,
