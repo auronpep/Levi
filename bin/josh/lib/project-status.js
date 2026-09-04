@@ -39,13 +39,25 @@ function renderDailyReview(projectId, opts = {}) {
     }
   }
 
+  // One damaged manifest must not take down the whole report. `listTodosInState`
+  // already skips todos it cannot read, so the todo half of this render survives
+  // a partial sync or an interrupted write; the agent half threw on the first bad
+  // file and `josh project status` produced nothing at all.
+  //
+  // Unreadable manifests are collected and reported at the end rather than
+  // silently dropped, so the operator can see the report is incomplete and which
+  // file to look at.
   const agentsDir = path.join(joshRoot, 'agents');
   const agents = [];
+  const unreadableAgents = [];
   if (fs.existsSync(agentsDir)) {
     for (const id of fs.readdirSync(agentsDir)) {
       const manifestPath = path.join(agentsDir, id, 'manifest.json');
       if (!fs.existsSync(manifestPath)) continue;
-      const m = readJson(manifestPath);
+      let m;
+      try { m = readJson(manifestPath); }
+      catch (e) { unreadableAgents.push({ id, error: e.message }); continue; }
+      if (!m || typeof m !== 'object') { unreadableAgents.push({ id, error: 'not a JSON object' }); continue; }
       if (m.project_id === projectId) agents.push(m);
     }
   }
@@ -75,8 +87,17 @@ function renderDailyReview(projectId, opts = {}) {
   }
   lines.push('');
   lines.push(`## Agents`);
-  for (const agent of agents.sort((a, b) => a.id.localeCompare(b.id))) {
+  // Sort by id, tolerating a manifest that parsed but has no id.
+  for (const agent of agents.sort((a, b) => String(a.id || '').localeCompare(String(b.id || '')))) {
     lines.push(`- ${agent.id}: ${agent.title} [${agent.status || 'UNKNOWN'}]`);
+  }
+
+  if (unreadableAgents.length > 0) {
+    lines.push('');
+    lines.push(`## Unreadable agent manifests (${unreadableAgents.length})`);
+    for (const u of unreadableAgents) {
+      lines.push(`- ${u.id}: ${u.error}`);
+    }
   }
 
   return lines.join('\n');
