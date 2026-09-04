@@ -186,13 +186,34 @@ function formatAge(isoString) {
   return `${Math.floor(h / 24)}d`;
 }
 
-function* walkTree(dir, depth = 0, maxDepth = 4) {
+// Directories that are not josh artifacts and must never be descended into.
+// A todo folder can hold a full git worktree - an entire repository checkout -
+// so walking it would be slow and would return thousands of irrelevant files.
+// That is what the depth cap was really guarding against, and capping depth to
+// do it also hid genuine artifacts that simply live deep:
+//
+//   todo/<state>/<id>/verdicts/dissent/<agent>.json     5 directories
+//   agents/<id>/evolve/<evolve-id>/round-N/gaps.json    5 directories
+//
+// Excluding the unbounded directories by name lets the cap be set by what josh
+// actually stores, rather than by how deep a checked-out repo happens to be.
+const WALK_SKIP_DIRS = new Set(['.git', 'node_modules']);
+
+function walkSkips(name) {
+  return WALK_SKIP_DIRS.has(name) || name === 'worktree' || /^worktree-/.test(name);
+}
+
+function* walkTree(dir, depth = 0, maxDepth = 6) {
   let entries;
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return; }
   for (const e of entries) {
     const full = path.join(dir, e.name);
-    if (e.isDirectory() && depth < maxDepth) yield* walkTree(full, depth + 1, maxDepth);
-    else if (e.isFile()) yield full;
+    if (e.isDirectory()) {
+      if (walkSkips(e.name)) continue;
+      if (depth < maxDepth) yield* walkTree(full, depth + 1, maxDepth);
+    } else if (e.isFile()) {
+      yield full;
+    }
   }
 }
 
@@ -3168,11 +3189,23 @@ function cmdValidate(args) {
   const results = { ok: 0, errors: [], skipped: 0, malformed_json: 0 };
   const byKind = {};
 
-  for (const file of walkTree(JOSH_ROOT, 0, 4)) {
+  for (const file of walkTree(JOSH_ROOT)) {
     const rel = path.relative(JOSH_ROOT, file).replace(/\\/g, '/');
     if (!rel.endsWith('.json')) continue;
     const v = validatorFor(rel);
-    if (!v) { results.skipped++; continue; }
+    if (!v) {
+      // No schema for this path, but a .json file that will not parse is
+      // malformed whatever its shape is meant to be — and `malformed JSON` is a
+      // number this command already reports. Skipping the parse meant the count
+      // only ever covered paths with a known validator.
+      results.skipped++;
+      try { JSON.parse(fs.readFileSync(file, 'utf8')); }
+      catch (e) {
+        results.malformed_json++;
+        results.errors.push({ file: rel, kind: 'unknown', errors: [`json parse: ${e.message}`] });
+      }
+      continue;
+    }
 
     let obj;
     try { obj = JSON.parse(fs.readFileSync(file, 'utf8')); }
