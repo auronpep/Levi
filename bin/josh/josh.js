@@ -38,6 +38,25 @@ const ew = require('./lib/events-writer');
 
 const JOSH_ROOT = process.env.JOSH_ROOT || path.join(os.homedir(), '.josh');
 
+// The todo lifecycle states, in order. `josh init` creates a directory for each
+// and the status board counts each, so both come from this one list - they had
+// drifted apart, with init creating 13 directories and status reporting on 5.
+const TODO_STATES = [
+  'incoming',
+  'triaged',
+  'claimed',
+  'planning',
+  'awaiting_approval',
+  'approved',
+  'rejected',
+  'revised',
+  'in_progress',
+  'done',
+  'blocked',
+  'failed',
+  'cancelled'
+];
+
 const SUBDIRS = [
   'claude/incoming',
   'claude/outgoing',
@@ -47,19 +66,7 @@ const SUBDIRS = [
   'codex/processed',
   'orchestrator/incoming',
   'orchestrator/processed',
-  'todo/incoming',
-  'todo/triaged',
-  'todo/claimed',
-  'todo/planning',
-  'todo/awaiting_approval',
-  'todo/approved',
-  'todo/rejected',
-  'todo/revised',
-  'todo/in_progress',
-  'todo/done',
-  'todo/blocked',
-  'todo/failed',
-  'todo/cancelled',
+  ...TODO_STATES.map(s => `todo/${s}`),
   'approvals/pending',
   'approvals/done',
   'reviews/pending',
@@ -136,15 +143,13 @@ function countDir(p) {
 }
 
 function refreshQueueCounts(status) {
-  status.queue = {
-    incoming:           countDir(path.join(JOSH_ROOT, 'todo', 'incoming')),
-    triaged:            countDir(path.join(JOSH_ROOT, 'todo', 'triaged')),
-    in_progress:        countDir(path.join(JOSH_ROOT, 'todo', 'in_progress')),
-    blocked:            countDir(path.join(JOSH_ROOT, 'todo', 'blocked')),
-    failed:             countDir(path.join(JOSH_ROOT, 'todo', 'failed')),
-    approvals_pending:  countDir(path.join(JOSH_ROOT, 'approvals', 'pending')),
-    reviews_pending:    countDir(path.join(JOSH_ROOT, 'reviews', 'pending'))
-  };
+  const queue = {};
+  for (const state of TODO_STATES) {
+    queue[state] = countDir(path.join(JOSH_ROOT, 'todo', state));
+  }
+  queue.approvals_pending = countDir(path.join(JOSH_ROOT, 'approvals', 'pending'));
+  queue.reviews_pending   = countDir(path.join(JOSH_ROOT, 'reviews', 'pending'));
+  status.queue = queue;
   return status;
 }
 
@@ -158,7 +163,7 @@ function emptyStatus() {
       orchestrator: { alive: false, last_tick: null, tick_count: 0, interval_sec: 300 }
     },
     queue: {
-      incoming: 0, triaged: 0, in_progress: 0, blocked: 0, failed: 0,
+      ...Object.fromEntries(TODO_STATES.map(s => [s, 0])),
       approvals_pending: 0, reviews_pending: 0
     }
   };
