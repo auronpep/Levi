@@ -90,7 +90,4 @@ C:\Levi\
 
 ## Maintainers
 
-- VoteWood (owner)
-- erewhonsgroup (admin)
-- auronpep (admin)
-- JWoodMedia (admin)
+- auronpep (owner)
