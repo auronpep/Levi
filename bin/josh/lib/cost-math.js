@@ -57,7 +57,18 @@ function enforceCeiling(candidates, todo, ceiling = MAX_TOKENS_PER_VERDICT) {
   list.sort((a, b) => b.tokens - a.tokens); // highest first
   let total = list.reduce((s, x) => s + x.tokens, 0);
   const pruned = [];
-  while (total > ceiling && list.length > 0) {
+  // Stop at one, not zero. A token ceiling is there to bound what a matrix costs,
+  // not to decide that the work does not happen: when a single candidate's own
+  // prediction exceeded the ceiling, the loop pruned everything and handed back
+  // `kept: []`. matrix-router passes that straight through as `candidates: []`,
+  // so a long task quietly produced a matrix with nobody in it - no verdicts, no
+  // winner, and nothing saying why.
+  //
+  // The list is sorted largest-first and shifted from the front, so the survivor
+  // is the cheapest candidate. `ceiling_exceeded` reports the case where even
+  // that one does not fit, which is a decision for the caller rather than
+  // something to resolve by dropping the last agent.
+  while (total > ceiling && list.length > 1) {
     const dropped = list.shift();
     pruned.push({ agent_id: dropped.agent.id, tokens: dropped.tokens, reason: 'over_ceiling' });
     total -= dropped.tokens;
@@ -67,6 +78,7 @@ function enforceCeiling(candidates, todo, ceiling = MAX_TOKENS_PER_VERDICT) {
     pruned,
     total_tokens: total,
     ceiling,
+    ceiling_exceeded: total > ceiling,
   };
 }
 
