@@ -1,0 +1,8 @@
+{
+  "name": "levi",
+  "private": true,
+  "description": "Levi — Claude Code plugin shell. Root test runner only; the plugin itself is loaded via .claude-plugin/plugin.json.",
+  "scripts": {
+    "test": "node scripts/run-tests.js"
+  }
+}
