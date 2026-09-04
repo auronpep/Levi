@@ -1822,6 +1822,7 @@ function cmdHeartbeat(args) {
       options: {
         as:    { type: 'string' },
         actor: { type: 'string' },
+        force: { type: 'boolean' },
       },
       allowPositionals: true,
       strict: true
@@ -1838,6 +1839,22 @@ function cmdHeartbeat(args) {
 
   const todo = readJson(located.path);
   if (!todo) return errExit(`malformed todo at ${located.relative}`, 4);
+
+  // A heartbeat means "I am still working on this", and it resets the claim TTL.
+  // Anyone being able to send it meant a third party could keep a dead agent's
+  // claim alive indefinitely: `tick` never expires it, the todo is never
+  // returned to the queue, and it stays pinned to an agent that may be gone.
+  //
+  // The TTL is the mechanism that recovers abandoned work; only the claimant can
+  // legitimately say the work is still being done.
+  const claimant = todo.claim && todo.claim.by;
+  if (claimant && claimant !== actor && !parsed.values.force) {
+    return errExit(
+      `todo is claimed by ${claimant}, not ${actor}; only the claimant can heartbeat it. `
+      + `Pass --force to override.`,
+      3
+    );
+  }
 
   const now = new Date().toISOString();
   if (todo.claim) todo.claim.at = now;
