@@ -19,12 +19,21 @@ function writeAgentManifest(joshRoot, agentId, manifest) {
 function resolveAllowedTools(joshRoot, agentId) {
   const m = readAgentManifest(joshRoot, agentId);
   if (!m) return null;
-  // null/missing/[] = full access (v1 backward-compat). Explicitly empty array = full access.
-  // ['*'] = explicit full access. Any other array = restricted scope.
+  // An ABSENT allowed_tools means "never scoped" → full access. That is the v1
+  // case: v1 predates the field, so a v1 manifest has no key here at all and is
+  // caught by the isArray check below.
+  //
+  // An EMPTY allowed_tools is a different statement. It is only ever produced by
+  // v2 code - by removeAllowedTool() taking out the last entry, or by an explicit
+  // setAllowedTools(agent, []) - and in both cases the operator was subtracting
+  // permission. Collapsing it to "full access" inverted the one operation whose
+  // entire purpose is to take access away. checkScope() has always read a
+  // present-but-empty list as deny-all; this is the other half agreeing with it.
+  //
+  // ['*'] remains the way to say "unrestricted" on purpose.
   if (!Array.isArray(m.allowed_tools)) return null;     // unset → full
-  if (m.allowed_tools.length === 0) return null;        // empty → full (v1 default)
   if (m.allowed_tools.includes('*')) return null;       // explicit wildcard
-  return m.allowed_tools.slice();
+  return m.allowed_tools.slice();                       // [] → restricted to nothing
 }
 
 function checkScope(allowed, toolId) {
