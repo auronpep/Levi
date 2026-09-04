@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { CONFLICT_RE } = require('./sync-conflict');
 
 const STATUSES = ['approve', 'hold', 'rewrite', 'reject'];
 const ALL_LIVE_STATES = [
@@ -141,13 +142,30 @@ function readEnvelope(joshRoot, todoId, agentId) {
   return JSON.parse(fs.readFileSync(p, 'utf8'));
 }
 
+// A Syncthing conflict copy of a verdict is a duplicate of one agent's file, not
+// a verdict from a new agent. `verdicts/` is exactly the kind of directory two
+// machines both write to, so `A01.sync-conflict-<stamp>-<host>.json` lands beside
+// `A01.json` routinely.
+//
+// It ends in `.json` and is not `winner.json`, so it used to be returned as an
+// agent id. That inflated the envelope count the matrix gate compares against N,
+// letting adjudication fire before every real candidate had answered; it counted
+// one agent's opinion twice; and the fabricated id was then passed on to
+// readTrust/updateTrust, which would create an `agents/A01.sync-conflict-.../`
+// directory for an agent that does not exist.
+//
+// `josh sync resolve` cleans these up, but the sweep runs on every tick and does
+// not wait for that.
 function listVerdicts(joshRoot, todoId) {
   const folder = findTodoFolder(joshRoot, todoId);
   if (!folder) return [];
   const dir = path.join(folder, 'verdicts');
   if (!fs.existsSync(dir)) return [];
   return fs.readdirSync(dir, { withFileTypes: true })
-    .filter((e) => e.isFile() && e.name.endsWith('.json') && e.name !== 'winner.json')
+    .filter((e) => e.isFile()
+      && e.name.endsWith('.json')
+      && e.name !== 'winner.json'
+      && !CONFLICT_RE.test(e.name))
     .map((e) => e.name.replace(/\.json$/, ''));
 }
 
