@@ -3186,11 +3186,27 @@ function cmdValidate(args) {
     });
   } catch (e) { return errExit(e.message, 1); }
 
-  const results = { ok: 0, errors: [], skipped: 0, malformed_json: 0 };
+  const results = { ok: 0, errors: [], skipped: 0, malformed_json: 0, conflicts: [] };
   const byKind = {};
+  const { CONFLICT_RE } = require('./lib/sync-conflict');
 
   for (const file of walkTree(JOSH_ROOT)) {
     const rel = path.relative(JOSH_ROOT, file).replace(/\\/g, '/');
+
+    // A Syncthing conflict copy is usually *valid JSON* — it is a byte copy of a
+    // good file — so it sailed through validation and was counted as another
+    // healthy artifact. On a one-todo root with one conflict copy, validate
+    // reported "todo ok: 2" and "✓ all files valid".
+    //
+    // That matters beyond the miscount: conflict copies in verdicts/ are read as
+    // extra agents, and copies in todo/ are extra todos. `josh validate` is the
+    // health check for a system built on Syncthing, so its signature failure
+    // should be something it names rather than something it certifies.
+    if (CONFLICT_RE.test(rel)) {
+      results.conflicts.push(rel);
+      continue;
+    }
+
     if (!rel.endsWith('.json')) continue;
     const v = validatorFor(rel);
     if (!v) {
@@ -3226,16 +3242,24 @@ function cmdValidate(args) {
     }
   }
 
+  // An unresolved conflict is a problem that needs an action, so --strict
+  // treats it like an error even though the file itself parses.
+  const problems = results.errors.length + results.conflicts.length;
+
   if (parsed.values.json) {
     log(JSON.stringify({ ok: results.ok, error_count: results.errors.length,
       malformed_json: results.malformed_json, skipped: results.skipped,
+      sync_conflicts: results.conflicts.length, conflicts: results.conflicts,
       by_kind: byKind, errors: results.errors }, null, 2));
-    return parsed.values.strict && results.errors.length > 0 ? 1 : 0;
+    return parsed.values.strict && problems > 0 ? 1 : 0;
   }
 
   log(`josh validate — ${JOSH_ROOT}`);
   log(``);
   log(`scanned: ${results.ok + results.errors.length} validatable files (${results.skipped} skipped, ${results.malformed_json} malformed JSON)`);
+  if (results.conflicts.length > 0) {
+    log(`sync conflicts: ${results.conflicts.length} (run 'josh sync resolve')`);
+  }
   log(``);
   log(`by kind:`);
   for (const [kind, counts] of Object.entries(byKind)) {
@@ -3250,12 +3274,21 @@ function cmdValidate(args) {
       log(`  ${e.file} [${e.kind}]:`);
       for (const msg of e.errors) log(`    - ${msg}`);
     }
-  } else {
+  } else if (results.conflicts.length === 0) {
     log(``);
     log(`✓ all files valid`);
   }
 
-  return parsed.values.strict && results.errors.length > 0 ? 1 : 0;
+  if (results.conflicts.length > 0) {
+    log(``);
+    log(`sync conflicts:`);
+    for (const c of results.conflicts) log(`  ${c}`);
+    log(``);
+    log(`  These are unmerged Syncthing copies. They parse as valid JSON, so they`);
+    log(`  are counted as real todos/verdicts until resolved. Run 'josh sync resolve'.`);
+  }
+
+  return parsed.values.strict && problems > 0 ? 1 : 0;
 }
 
 function cmdProject(args) {
