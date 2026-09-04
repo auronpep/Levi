@@ -2414,7 +2414,8 @@ function decideApproval(args, decision) {
         as:     { type: 'string' },
         actor:  { type: 'string' },
         note:   { type: 'string' },
-        reason: { type: 'string' }
+        reason: { type: 'string' },
+        force:  { type: 'boolean' }
       },
       allowPositionals: true,
       strict: true
@@ -2427,6 +2428,27 @@ function decideApproval(args, decision) {
   const located = locateApproval(idArg);
   if (located.error) return errExit(located.error, located.code);
   if (located.state !== 'pending') return errExit(`approval already ${located.state}`, 1);
+
+  // `josh push approval` is the human-gated decision primitive. If the party
+  // asking for permission can grant it, the gate grants nothing — so an approval
+  // may not be approved by its own requester.
+  //
+  // Only `approve` is restricted. Denying your own request withdraws it, which
+  // grants no permission and is a reasonable thing for a requester to do.
+  //
+  // Checked before the rename so a refusal leaves the approval pending.
+  const preApproval = readJson(located.path) || {};
+  const decidingActor = resolveActor(parsed.values);
+  const selfApproval = decision === 'approve'
+    && !!preApproval.requester
+    && preApproval.requester === decidingActor;
+  if (selfApproval && !parsed.values.force) {
+    return errExit(
+      `approval ${located.id} was requested by ${preApproval.requester}; `
+      + `it cannot approve its own request. Approve as a different actor, or pass --force.`,
+      1
+    );
+  }
 
   const fromPath = located.path;
   const toPath = path.join(JOSH_ROOT, 'approvals', 'done', `${located.id}.json`);
@@ -2459,7 +2481,12 @@ function decideApproval(args, decision) {
     actor,
     action: 'approval.decided',
     id: located.id,
-    details: { decision, ...(parsed.values.note ? { note: parsed.values.note } : {}), ...(parsed.values.reason ? { reason: parsed.values.reason } : {}) }
+    details: {
+      decision,
+      ...(parsed.values.note ? { note: parsed.values.note } : {}),
+      ...(parsed.values.reason ? { reason: parsed.values.reason } : {}),
+      ...(selfApproval ? { self_approved: true, requester: preApproval.requester } : {})
+    }
   });
 
   log(located.id);
