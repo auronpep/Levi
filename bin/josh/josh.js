@@ -3891,7 +3891,7 @@ Subcommands:
   start <agent-id> [--max-rounds 5] [--simulator <dir>] [--allow-any]
   status [<evolve-id>]
   list [--state active|pending_approval|done]
-  approve <evolve-id> [--as actor]
+  approve <evolve-id> [--as actor] [--force]   (an agent cannot approve its own brief rewrite)
   reject <evolve-id> --reason "..." [--as actor]`);
     return 0;
   }
@@ -3990,16 +3990,56 @@ function cmdEvolveList(args) {
 
 function cmdEvolveApprove(args) {
   let parsed;
-  try { parsed = parseArgs({ args, options: { as: { type: 'string' }, actor: { type: 'string' } }, allowPositionals: true, strict: true }); }
+  try {
+    parsed = parseArgs({
+      args,
+      options: {
+        as:    { type: 'string' },
+        actor: { type: 'string' },
+        force: { type: 'boolean' }
+      },
+      allowPositionals: true,
+      strict: true
+    });
+  }
   catch (e) { return errExit(e.message, 1); }
   const evId = parsed.positionals[0];
   if (!evId) return errExit('evolve approve requires <evolve-id>', 1);
+  const actor = resolveActor(parsed.values);
+
+  // Approving an evolution overwrites the agent's own operating brief — the
+  // document that states its mission, its acceptance gates and what it must not
+  // do — and bumps the manifest version. An agent approving its own rewrite is
+  // an agent editing its own constraints and signing off on the edit.
+  //
+  // The subject is encoded in the evolve id (`evolve-<agentId>-<ulid>`), which is
+  // how applyApproval finds the agent in the first place.
+  const subject = /^evolve-([^-]+)-/.exec(evId);
+  const agentId = subject ? subject[1] : null;
+  const selfApproval = !!agentId && agentId === actor;
+  if (selfApproval && !parsed.values.force) {
+    return errExit(
+      `${evId} rewrites ${agentId}'s own brief; ${agentId} cannot approve it. `
+      + `Approve as a different actor, or pass --force.`,
+      1
+    );
+  }
+
   const { applyApproval } = require('./lib/spec-evolver');
   let r;
-  try { r = applyApproval(JOSH_ROOT, evId, { actor: resolveActor(parsed.values) }); }
+  try { r = applyApproval(JOSH_ROOT, evId, { actor }); }
   catch (e) { return errExit(e.message, 4); }
   log(`evolved ${r.agent_id} → version ${r.new_version}`);
-  appendAudit({ actor: resolveActor(parsed.values), action: 'agent.evolved', id: evId, details: { agent_id: r.agent_id, new_version: r.new_version } });
+  appendAudit({
+    actor,
+    action: 'agent.evolved',
+    id: evId,
+    details: {
+      agent_id: r.agent_id,
+      new_version: r.new_version,
+      ...(selfApproval ? { self_approved: true } : {})
+    }
+  });
   return 0;
 }
 
