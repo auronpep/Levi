@@ -4620,4 +4620,28 @@ function main() {
   }
 }
 
-process.exit(main());
+// Only run the CLI when invoked directly. When required as a module (tests),
+// export the internals so they can be unit-tested without spawning a process.
+if (require.main === module) {
+  process.exit(main());
+}
+
+module.exports = {
+  JOSH_ROOT,
+  COMMANDS,
+  main,
+  // helpers
+  readJson,
+  writeJsonAtomic,
+  ulid,
+  appendAudit,
+  countDir,
+  refreshQueueCounts,
+  emptyStatus,
+  formatAge,
+  walkTree,
+  findById,
+  findTodoFolderById,
+  defaultActor,
+  resolveActor
+};
