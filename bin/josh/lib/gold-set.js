@@ -28,8 +28,19 @@ function writeGoldItem(joshRoot, agentId, item) {
   fs.renameSync(tmp, path.join(dir, `${item.id}.json`));
 }
 
+// A gold item is only usable as a test if it states what it expects. readGold
+// already skips files that will not parse; this is the same judgement applied to
+// a file that parses fine but has no expectation in it.
+function isUsableItem(item) {
+  return !!item
+    && typeof item.expected_verdict === 'object'
+    && item.expected_verdict !== null
+    && !Array.isArray(item.expected_verdict);
+}
+
 function matchesItem(item, produced) {
   if (!produced) return false;
+  if (!isUsableItem(item)) return false;
   if (produced.status !== item.expected_verdict.status) return false;
   const expected = item.expected_verdict.claim_text || '';
   const got = produced.claim_text || '';
@@ -45,15 +56,33 @@ function matchesItem(item, produced) {
 
 function replayGold(joshRoot, agentId, producedByGoldId, priorResults = null) {
   const items = readGold(joshRoot, agentId);
-  let pass = 0, fail = 0, regression_count = 0;
+  let pass = 0, fail = 0, skipped = 0, regression_count = 0;
   const detail = [];
   for (const item of items) {
-    const produced = producedByGoldId && producedByGoldId[item.id];
+    const produced = (producedByGoldId && item && producedByGoldId[item.id]) || null;
+
+    // An item with no expected_verdict has nothing to compare against. Scoring it
+    // as a failure would report the agent as wrong for an incomplete fixture, so
+    // it is set aside and counted separately - visible, but not on the agent's
+    // record and never a regression.
+    if (!isUsableItem(item)) {
+      skipped++;
+      detail.push({
+        gold_id: (item && item.id) || null,
+        expected: null,
+        got: produced,
+        match: false,
+        skipped: true,
+        reason: 'gold item has no expected_verdict',
+      });
+      continue;
+    }
+
     const ok = matchesItem(item, produced);
     detail.push({
       gold_id: item.id,
       expected: item.expected_verdict,
-      got: produced || null,
+      got: produced,
       match: ok,
     });
     if (ok) pass++;
@@ -62,7 +91,7 @@ function replayGold(joshRoot, agentId, producedByGoldId, priorResults = null) {
       if (priorResults && priorResults[item.id] === 'pass') regression_count++;
     }
   }
-  return { pass, fail, regression_count, items: detail, total: items.length };
+  return { pass, fail, skipped, regression_count, items: detail, total: items.length };
 }
 
 module.exports = { readGold, writeGoldItem, replayGold, goldDir };
