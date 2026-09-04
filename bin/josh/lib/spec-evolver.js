@@ -238,13 +238,23 @@ function assembleApproval(joshRoot, agentId, evolveId) {
   };
   fs.writeFileSync(path.join(approvalDir, 'gold-replay.json'), JSON.stringify(goldReplay, null, 2));
 
-  const lastRound = state.history[state.history.length - 1];
+  // Report the winning round's numbers, not the last round's. On a `regression`
+  // halt those are different rounds: checkHaltRules sets
+  // `revert_to_round = latest.round_num - 1`, so the brief being applied is the
+  // round *before* the one that regressed — and after.md is written from it.
+  // Reading the metrics off the last round therefore described the discarded
+  // round, and specifically the worse one: an approval could read
+  // "winning_round: 2, pass_rate: 0.400" when round 2 actually scored 1.000.
+  // That is a human-facing document whose quality figure contradicts the change
+  // it is attached to.
+  const winningRound = state.history.find((h) => h.round_num === winRound)
+    || state.history[state.history.length - 1];
   const approvalSummary = `# Evolve approval — ${agentId} (${evolveId})
 
 - halt_reason: ${state.halt_reason}
 - winning_round: ${winRound}
-- pass_rate: ${(lastRound && lastRound.pass_rate || 0).toFixed(3)}
-- brief_size: ${lastRound && lastRound.brief_lines || '?'} lines
+- pass_rate: ${((winningRound && winningRound.pass_rate) || 0).toFixed(3)}
+- brief_size: ${(winningRound && winningRound.brief_lines) || '?'} lines
 - old_brief_hash: ${state.brief_hash_v1}
 - new_brief_hash: ${briefHash(afterText)}
 `;
