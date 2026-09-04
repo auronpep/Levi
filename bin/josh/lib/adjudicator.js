@@ -35,20 +35,47 @@ function enqueueAdjudication(joshRoot, todoId, candidateAgentIds) {
   const folder = findTodoFolder(joshRoot, todoId);
   if (!folder) throw new Error(`todo ${todoId} not found`);
   const id = 'adj-' + ulid();
-  const candidates = candidateAgentIds.map((agentId) => {
+
+  // An envelope that is missing its payload used to reach `env.payload.status`
+  // and throw a bare TypeError, which aborted the whole enqueue - so one
+  // malformed verdict meant none of the well-formed ones were adjudicated
+  // either. `writeEnvelope` validates, but `verdicts/` is a directory external
+  // agent runtimes write into directly and that Syncthing replicates, so an
+  // envelope can land here without having gone through it.
+  //
+  // Unusable envelopes are set aside and named, so the agents that answered
+  // properly still get adjudicated. A missing envelope is still a hard error -
+  // that means the caller asked for a candidate who never submitted at all.
+  const candidates = [];
+  const excluded = [];
+  for (const agentId of candidateAgentIds) {
     const envelopeFile = path.join(folder, 'verdicts', `${agentId}.json`);
     if (!fs.existsSync(envelopeFile)) {
       throw new Error(`candidate ${agentId} has no envelope at ${envelopeFile}`);
     }
-    const env = JSON.parse(fs.readFileSync(envelopeFile, 'utf8'));
-    return {
+    let env;
+    try { env = JSON.parse(fs.readFileSync(envelopeFile, 'utf8')); }
+    catch (e) {
+      excluded.push({ agent_id: agentId, envelope_path: envelopeFile, reason: `unparseable: ${e.message}` });
+      continue;
+    }
+    if (!env || typeof env !== 'object' || Array.isArray(env) || !env.payload || typeof env.payload !== 'object') {
+      excluded.push({ agent_id: agentId, envelope_path: envelopeFile, reason: 'envelope has no payload' });
+      continue;
+    }
+    candidates.push({
       agent_id: agentId,
       envelope_path: envelopeFile,
       status: env.payload.status,
       confidence: env.confidence,
       sentinel: env.sentinel || null,
-    };
-  });
+    });
+  }
+  if (candidates.length === 0) {
+    throw new Error(
+      `no usable envelopes for ${todoId}: ${excluded.map((e) => `${e.agent_id} (${e.reason})`).join('; ')}`
+    );
+  }
   const trust_scores = {};
   for (const agentId of candidateAgentIds) {
     const t = readTrust(joshRoot, agentId);
@@ -60,6 +87,7 @@ function enqueueAdjudication(joshRoot, todoId, candidateAgentIds) {
     id,
     todo_id: todoId,
     candidates,
+    excluded,
     trust_scores,
     gold_match: null,
     queued_at: new Date().toISOString(),
