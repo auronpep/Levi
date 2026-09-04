@@ -1,6 +1,12 @@
 'use strict';
 
 function parseFrontmatter(text) {
+  // Normalise line endings before anything else. Every comparison below assumes
+  // \n — the leading '---\n' check, the block split, the two-space indent tests
+  // and the '    - ' list prefix. A Windows checkout produces CRLF, so a file
+  // beginning '---\r\n' failed the very first check and parsed as null, which
+  // emptied the trigger registry and left the PreToolUse hook matching nothing.
+  text = String(text == null ? '' : text).replace(/\r\n/g, '\n');
   if (!text.startsWith('---\n')) return null;
   const end = text.indexOf('\n---', 4);
   if (end === -1) return null;
