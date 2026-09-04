@@ -52,6 +52,15 @@ function computeDriftAlerts(joshRoot, opts = {}) {
   // For every (agent, archetype) pair, count disagreements among the last `window` runs.
   const tally = new Map();   // key: "agent|archetype" -> { total, disagreed }
   for (const r of runs.slice(0, window * 5)) {  // bound by 5×window for perf
+    // A run whose winner was never recorded cannot testify about agreement.
+    // "Disagreement" is defined as `c !== winner_id`, and every candidate
+    // differs from a missing winner - so counting such a run marks every
+    // participating agent as a 100% dissenter, including the agents that in
+    // fact won every matrix they entered. Absence of a winner is absence of
+    // evidence, not evidence of drift. Agent ids are strings throughout, so a
+    // usable winner is a non-empty string; anything else is skipped rather
+    // than compared.
+    if (typeof r.winner_id !== 'string' || r.winner_id === '') continue;
     const archetype = r.archetype || 'general';
     for (const c of r.candidates) {
       const key = `${c}|${archetype}`;
