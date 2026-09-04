@@ -953,13 +953,23 @@ function processAllControls() {
 // ─── Commands ────────────────────────────────────────────────────────────────
 
 function cmdInit() {
-  if (!fs.existsSync(JOSH_ROOT)) {
+  const rootExisted = fs.existsSync(JOSH_ROOT);
+  if (!rootExisted) {
     fs.mkdirSync(JOSH_ROOT, { recursive: true });
     log(`created  ${JOSH_ROOT}`);
   }
 
+  // Only worth saying on a root that already existed. On a brand-new one this
+  // fired every single time — `init` had just created the directory the README
+  // would live in, nothing could have put a file there, `init` does not create
+  // one, and no command tells you to. A warning that is guaranteed on first run
+  // and names no action is noise, and it went to stderr, so it also polluted
+  // scripted output.
+  //
+  // On an established root a missing spec is genuinely worth flagging, so that
+  // case still warns.
   const readmePath = path.join(JOSH_ROOT, 'README.md');
-  if (!fs.existsSync(readmePath)) {
+  if (rootExisted && !fs.existsSync(readmePath)) {
     err(`warn: no README.md at ${readmePath} — initializing tree without spec.`);
   }
 
