@@ -20,12 +20,26 @@ function readGold(joshRoot, agentId) {
   return out;
 }
 
+// The id becomes the filename, so it has to be a name and nothing else. Template
+// interpolation turned a missing id into the literal file `undefined.json` - one
+// name shared by every id-less item, so the second write destroyed the first -
+// and turned a relative id into a path that landed outside the gold directory.
+const GOLD_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+function assertGoldId(id) {
+  if (typeof id !== 'string' || !GOLD_ID_RE.test(id)) {
+    throw new Error(`gold item id must match [A-Za-z0-9_-]{1,64}, got ${JSON.stringify(id)}`);
+  }
+  return id;
+}
+
 function writeGoldItem(joshRoot, agentId, item) {
+  const id = assertGoldId(item && item.id);
   const dir = goldDir(joshRoot, agentId);
   fs.mkdirSync(dir, { recursive: true });
-  const tmp = path.join(dir, `${item.id}.json.tmp`);
+  const tmp = path.join(dir, `${id}.json.tmp`);
   fs.writeFileSync(tmp, JSON.stringify(item, null, 2) + '\n');
-  fs.renameSync(tmp, path.join(dir, `${item.id}.json`));
+  fs.renameSync(tmp, path.join(dir, `${id}.json`));
 }
 
 // A gold item is only usable as a test if it states what it expects. readGold
@@ -94,4 +108,4 @@ function replayGold(joshRoot, agentId, producedByGoldId, priorResults = null) {
   return { pass, fail, skipped, regression_count, items: detail, total: items.length };
 }
 
-module.exports = { readGold, writeGoldItem, replayGold, goldDir };
+module.exports = { readGold, writeGoldItem, replayGold, goldDir, assertGoldId };
