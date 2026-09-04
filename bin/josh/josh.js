@@ -3268,7 +3268,7 @@ function cmdPlan(args) {
 
 Subcommands:
   submit <todo-id> --plan <path>          claimed → awaiting_approval (validates 8-section plan)
-  approve <todo-id>                       awaiting_approval → approved (writes approval signal)
+  approve <todo-id> [--as X] [--force]    awaiting_approval → approved (a plan's author cannot approve it)
   reject <todo-id> --reason "..."         awaiting_approval → rejected`);
     return 0;
   }
@@ -3360,6 +3360,7 @@ function cmdPlanApprove(args) {
         as:    { type: 'string' },
         actor: { type: 'string' },
         note:  { type: 'string' },
+        force: { type: 'boolean' },
       },
       allowPositionals: true,
       strict: true,
@@ -3368,6 +3369,35 @@ function cmdPlanApprove(args) {
   const idArg = parsed.positionals[0];
   if (!idArg) return errExit('plan approve requires <todo-id>', 1);
   const actor = resolveActor(parsed.values);
+
+  // The plan gate exists so that something other than the agent decides whether
+  // the agent's plan should run. `claimed → planning → awaiting_approval →
+  // approved` is the review step before execution, and without this check the
+  // agent that wrote the plan could walk the whole lifecycle itself: submit,
+  // approve, execute. The gate stayed in place and simply stopped gating.
+  //
+  // A claim carries two identities and either one is "the author": `claim.by` is
+  // the actor that ran the command, `claim.agent_id` is the agent it was claimed
+  // for (`josh claim <id> --agent claude` records by=cli:<user>, agent_id=claude).
+  // Both must be barred, or an agent approves its own plan simply by using the
+  // identity the claim did not happen to record under.
+  //
+  // `--force` covers a single-operator setup where the reviewer genuinely shares
+  // the agent's actor name, and it is recorded in the audit event.
+  const preLocated = locateTodo(idArg, ['awaiting_approval']);
+  if (preLocated.error) return errExit(preLocated.error, preLocated.code);
+  const preTodo = readJson(preLocated.path) || {};
+  const claim = preTodo.claim || {};
+  const authors = [claim.by, claim.agent_id, preTodo.claimed_by].filter(Boolean);
+  const selfApproval = authors.includes(actor);
+  const author = selfApproval ? actor : (authors[0] || null);
+  if (selfApproval && !parsed.values.force) {
+    return errExit(
+      `plan for ${preLocated.id} was authored by ${author}; it cannot approve its own plan. `
+      + `Approve as a different actor, or pass --force.`,
+      1
+    );
+  }
 
   const r = transitionTodo({
     srcStates: ['awaiting_approval'],
@@ -3380,7 +3410,13 @@ function cmdPlanApprove(args) {
       t.plan_approved_at = now;
       t.plan_approved_by = actor;
     },
-    audit: { action: 'todo.plan_approved', details: parsed.values.note ? { note: parsed.values.note } : {} },
+    audit: {
+      action: 'todo.plan_approved',
+      details: {
+        ...(parsed.values.note ? { note: parsed.values.note } : {}),
+        ...(selfApproval ? { self_approved: true, author } : {})
+      }
+    },
   });
   if (r.error) return errExit(r.error, r.code);
 
