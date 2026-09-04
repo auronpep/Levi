@@ -4,6 +4,7 @@
 // attacker pointing the predictable flag path at a sensitive file).
 
 const fs = require('fs');
+const crypto = require('crypto');
 
 function isSafe(filePath) {
   try {
@@ -15,11 +16,25 @@ function isSafe(filePath) {
 
 exports.writeFlag = function (flagPath, content) {
   if (!isSafe(flagPath)) return;
-  const tmp = flagPath + '.tmp';
+
+  // The symlink guard used to be applied only to `flagPath`, while the write
+  // went to the fixed, equally predictable `flagPath + '.tmp'`. Pointing *that*
+  // at a sensitive file defeated the stated defence entirely: the write followed
+  // the link, and the subsequent rename left the flag itself a symlink to the
+  // target.
+  //
+  // Two changes close it without a check-then-use window:
+  //   - a unique scratch name, so there is nothing predictable to pre-plant
+  //   - 'wx' (O_CREAT|O_EXCL), which refuses to open an existing path at all,
+  //     symlink or not, rather than following it
+  const tmp = `${flagPath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
   try {
-    fs.writeFileSync(tmp, String(content), { mode: 0o600 });
+    fs.writeFileSync(tmp, String(content), { flag: 'wx', mode: 0o600 });
     fs.renameSync(tmp, flagPath);
-  } catch (e) { /* silent — never block the hook */ }
+  } catch (e) {
+    // Never block the hook — but do not leave scratch files behind either.
+    try { fs.unlinkSync(tmp); } catch (e2) { /* nothing to clean up */ }
+  }
 };
 
 exports.readFlag = function (flagPath) {
