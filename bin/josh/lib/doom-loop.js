@@ -6,10 +6,29 @@ const path = require('node:path');
 const DEFAULT_MAX_FAILURES = 3;
 const SCAN_STATES = ['failed', 'triaged'];
 
+// Failures are counted since the last time this todo was quarantined for
+// looping - not over its whole lifetime.
+//
+// The sweep scans `triaged`, and `josh unblock` is exactly what puts a todo back
+// into `triaged`. Counting from the beginning of history meant the failures that
+// caused the quarantine were still on the tally after a human released it, so the
+// next tick re-blocked it immediately. `josh unblock` could never actually
+// unblock anything, and nothing said why - the only escape was hand-editing
+// meta.json.
+//
+// A doom loop is repeated failure without progress. Once an operator has looked
+// at it and deliberately released it, that decision is the new starting line;
+// three *fresh* failures will quarantine it again.
 function countFailureEvents(todo) {
   if (!todo || !Array.isArray(todo.history)) return 0;
+  let start = 0;
+  for (let i = todo.history.length - 1; i >= 0; i--) {
+    const h = todo.history[i];
+    if (h && h.event === 'doom_loop_blocked') { start = i + 1; break; }
+  }
   let n = 0;
-  for (const h of todo.history) {
+  for (let i = start; i < todo.history.length; i++) {
+    const h = todo.history[i];
     if (h && h.event === 'failed') n++;
   }
   return n;
