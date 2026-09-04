@@ -27,12 +27,19 @@ function readSkillBody(p) {
   try { return stripFrontmatter(fs.readFileSync(p, 'utf8')); } catch (e) { return null; }
 }
 
-let input = '';
-process.stdin.on('data', (chunk) => { input += chunk; });
-process.stdin.on('end', () => {
-  let inputData = {};
-  try { inputData = JSON.parse(input); } catch (e) { process.exit(0); }
-  const prompt = (inputData.prompt || '').trim();
+// Returns the string to write to stdout, or null. Exported so the behaviour can
+// be tested directly, the same way hooks/guards/tool-context-loader.js exports
+// processEvent.
+//
+// `inputData` is whatever JSON.parse produced, which is not necessarily an
+// object: `JSON.parse('null')` succeeds and returns null, and a prompt field is
+// not guaranteed to be a string. Both used to reach `(inputData.prompt || '')
+// .trim()` and throw, and the throw escaped the stdin 'end' handler as an
+// uncaught exception — so a hook documented to "always exit(0) cleanly even on
+// error" exited 1 on the UserPromptSubmit path, which runs on every prompt.
+function handlePrompt(inputData) {
+  const raw = (inputData && typeof inputData === 'object') ? inputData.prompt : undefined;
+  const prompt = (typeof raw === 'string' ? raw : '').trim();
 
   // === /talk <name> | /talk off | /talk ===
   const talkMatch = prompt.match(/^\/talk(?:\s+(\S.*?))?\s*$/i);
@@ -44,7 +51,7 @@ process.stdin.on('end', () => {
       writeFlag(talkFlag, arg);
     }
     // Empty arg → no-op (slash command lists modes)
-    process.exit(0);
+    return null;
   }
 
   // === Natural-language disable ===
@@ -53,7 +60,7 @@ process.stdin.on('end', () => {
       /\bnormal\s+mode\b/i.test(prompt) ||
       /\b(stop|quit)\s+talking\s+like\s+\w+/i.test(prompt)) {
     deleteFlag(talkFlag);
-    process.exit(0);
+    return null;
   }
 
   // === Natural-language activation: "talk like a caveman" ===
@@ -61,7 +68,7 @@ process.stdin.on('end', () => {
   if (natMatch) {
     const arg = natMatch[1].toLowerCase();
     if (SAFE_NAME_RX.test(arg)) writeFlag(talkFlag, arg);
-    // Don't exit — let prompt continue to Claude.
+    // Don't return — let the prompt continue to Claude.
   }
 
   // === Per-turn injection: load and emit the full SKILL body ===
@@ -78,12 +85,33 @@ process.stdin.on('end', () => {
         `until /talk off or a natural-language disable phrase. ` +
         `Drop the voice for: irreversible actions, security warnings, or when the user is confused.\n\n` +
         body.trim();
-      process.stdout.write(JSON.stringify({
+      return JSON.stringify({
         hookSpecificOutput: {
           hookEventName: 'UserPromptSubmit',
           additionalContext: context
         }
-      }));
+      });
     }
   }
-});
+  return null;
+}
+
+exports.handlePrompt = handlePrompt;
+
+// Only wire stdin when run as a hook, not when required by a test.
+if (require.main === module) {
+  let input = '';
+  process.stdin.on('error', () => process.exit(0));
+  process.stdin.on('data', (chunk) => { input += chunk; });
+  process.stdin.on('end', () => {
+    // A hook must never fail the turn it is attached to. Anything unexpected in
+    // here — a malformed payload, an fs error, a closed stdout — exits 0 quietly.
+    try {
+      let inputData = {};
+      try { inputData = JSON.parse(input); } catch (e) { process.exit(0); }
+      const out = handlePrompt(inputData);
+      if (out) process.stdout.write(out);
+    } catch (e) { /* silent — never block the hook */ }
+    process.exit(0);
+  });
+}
