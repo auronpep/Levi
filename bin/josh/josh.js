@@ -2840,7 +2840,8 @@ function cmdReview(args) {
         verdict:   { type: 'string' },
         reasoning: { type: 'string' },
         as:        { type: 'string' },
-        actor:     { type: 'string' }
+        actor:     { type: 'string' },
+        force:     { type: 'boolean' }
       },
       allowPositionals: true,
       strict: true
@@ -2860,6 +2861,24 @@ function cmdReview(args) {
   const located = locateReview(idArg);
   if (located.error) return errExit(located.error, located.code);
   if (located.state !== 'pending') return errExit(`review already ${located.state}`, 1);
+
+  // A review is assigned to a reviewer, and the feature exists to get a second
+  // agent's eyes on the work ("cross-agent code/design review"). Nothing checked
+  // that the actor submitting the verdict was that reviewer, so the agent whose
+  // work is under review could approve it — the record ends up saying
+  // `reviewer: codex` beside `completed_by: claude`, which is auditable after the
+  // fact but was never prevented.
+  //
+  // Checked before the rename, so a refusal leaves the review pending.
+  const preReview = readJson(located.path) || {};
+  const reviewActor = resolveActor(parsed.values);
+  if (preReview.reviewer && preReview.reviewer !== reviewActor && !parsed.values.force) {
+    return errExit(
+      `review ${located.id} is assigned to ${preReview.reviewer}, not ${reviewActor}. `
+      + `Pass --force to submit a verdict anyway.`,
+      1
+    );
+  }
 
   const fromPath = located.path;
   const toPath = path.join(JOSH_ROOT, 'reviews', 'done', `${located.id}.json`);
