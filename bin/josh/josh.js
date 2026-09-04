@@ -211,24 +211,30 @@ function formatAge(isoString) {
   return `${Math.floor(h / 24)}d`;
 }
 
-// Directories that are not josh artifacts and must never be descended into.
-// A todo folder can hold a full git worktree - an entire repository checkout -
-// so walking it would be slow and would return thousands of irrelevant files.
-// That is what the depth cap was really guarding against, and capping depth to
-// do it also hid genuine artifacts that simply live deep:
+// "approve in 29s" — what happens to a pending approval if nobody answers.
 //
-//   todo/<state>/<id>/verdicts/dissent/<agent>.json     5 directories
-//   agents/<id>/evolve/<evolve-id>/round-N/gaps.json    5 directories
-//
-// Excluding the unbounded directories by name lets the cap be set by what josh
-// actually stores, rather than by how deep a checked-out repo happens to be.
-const WALK_SKIP_DIRS = new Set(['.git', 'node_modules']);
-
-function walkSkips(name) {
-  return WALK_SKIP_DIRS.has(name) || name === 'worktree' || /^worktree-/.test(name);
+// An approval can carry `default_after_sec` + `default_choice`, and `tick`
+// applies them once the window passes. Two approvals that will resolve on their
+// own and one that will wait forever rendered identically in `josh list
+// approvals`, so the operator deciding which to action could not see that one of
+// them was about to decide itself.
+function formatAutoDefault(a) {
+  if (a._state !== 'pending') return '—';
+  if (!a.default_after_sec || !a.default_choice) return '—';
+  const dueAt = Date.parse(a.created_at) + a.default_after_sec * 1000;
+  if (!Number.isFinite(dueAt)) return '—';
+  const left = Math.max(0, Math.round((dueAt - Date.now()) / 1000));
+  return `${a.default_choice} in ${formatDurationShort(left)}`;
 }
 
-function* walkTree(dir, depth = 0, maxDepth = 6) {
+function formatDurationShort(sec) {
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h`;
+  return `${Math.floor(sec / 86400)}d`;
+}
+
+function* walkTree(dir, depth = 0, maxDepth = 4) {
   let entries;
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return; }
   for (const e of entries) {
@@ -2716,16 +2722,17 @@ function cmdListApprovals(args) {
   }
   if (items.length === 0) { log('(no approvals match)'); return 0; }
 
-  log(`id (last 6)  state    age      decision   requester              summary`);
-  log(`-----------  -------  -------  ---------  ---------------------  ------------------------`);
+  log(`id (last 6)  state    age      decision   auto             requester              summary`);
+  log(`-----------  -------  -------  ---------  ---------------  ---------------------  ------------------------`);
   for (const a of items) {
     const idShort = (a.id || '').slice(-6);
     const state = (a._state || '').padEnd(7);
     const age = formatAge(a.created_at).padEnd(7);
     const decision = (a.decision || '—').padEnd(9);
+    const auto = formatAutoDefault(a).padEnd(15);
     const req = (a.requester || '').slice(0, 21).padEnd(21);
     const summary = (a.summary || '').slice(0, 50);
-    log(`${idShort}       ${state}  ${age}  ${decision}  ${req}  ${summary}`);
+    log(`${idShort}       ${state}  ${age}  ${decision}  ${auto}  ${req}  ${summary}`);
   }
   return 0;
 }
