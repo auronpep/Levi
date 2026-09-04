@@ -74,10 +74,23 @@ function appendChainedAudit(joshRoot, eventInput, opts = {}) {
   return { hmac, key_id: keyId, date };
 }
 
-function verifyChain(joshRoot, dateStr) {
+// opts.strict — treat records that carry no hmac as integrity errors.
+//
+// By default an hmac-less line is counted as `unchained` and tolerated, so that
+// pre-Phase-6 events written by the plain appendAudit() path do not fail the
+// day. The cost of that tolerance is that omitting the hmac field is enough to
+// add a record the chain cannot attribute: a forged event lands in the file and
+// verifyChain still answers `valid: true`. Strict mode is for the case where the
+// question is "is every record in this file accounted for", not "is the chain
+// self-consistent" - an audit or an incident review. Off by default, so no
+// existing caller changes behaviour.
+function verifyChain(joshRoot, dateStr, opts = {}) {
+  const strict = !!opts.strict;
   const file = chainFile(joshRoot, dateStr);
   const errors = [];
-  if (!fs.existsSync(file)) return { valid: false, chain_length: 0, errors: [{ position: 0, message: 'no chain file' }] };
+  if (!fs.existsSync(file)) {
+    return { valid: false, chain_length: 0, chained: 0, unchained: 0, errors: [{ position: 0, message: 'no chain file' }] };
+  }
   const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
   let prev = GENESIS_HMAC;
   let pos = 0;
@@ -91,7 +104,13 @@ function verifyChain(joshRoot, dateStr) {
     // Pre-Phase-6 plain audit events have no `hmac` field. Count and skip them —
     // they're legacy, can't be cryptographically verified, but their presence is
     // NOT a chain integrity error. (Master design risk register noted this.)
-    if (!stored) { unchained++; continue; }
+    if (!stored) {
+      unchained++;
+      if (strict) {
+        errors.push({ position: pos, message: `unchained record at line ${pos}: no hmac, cannot be attributed` });
+      }
+      continue;
+    }
     const { hmac: _omit, ...rest } = ev;
     if (rest.prev_hmac !== prev) {
       errors.push({ position: pos, message: `prev_hmac mismatch at line ${pos}: expected ${prev.slice(0, 12)}... got ${(rest.prev_hmac || '').slice(0, 12)}...` });

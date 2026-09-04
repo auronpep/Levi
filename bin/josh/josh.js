@@ -3681,7 +3681,8 @@ function cmdAudit(args) {
     log(`Usage: josh audit <subcommand>
 
 Subcommands:
-  verify <date>                   Verify HMAC chain for a YYYY-MM-DD audit file
+  verify <date> [--strict]        Verify HMAC chain for a YYYY-MM-DD audit file
+                                  --strict also fails records that carry no hmac
   rotate-key [--id YYYY-MM]       Mint a new audit key + emit key_rotated event
   list-keys                       List audit keys present in ~/.josh/keys/`);
     return 0;
@@ -3697,10 +3698,11 @@ Subcommands:
 function cmdAuditVerify(args) {
   const date = args[0];
   if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return errExit('audit verify requires <YYYY-MM-DD>', 1);
+  const strict = args.includes('--strict');
   const { verifyChain } = require('./lib/audit-chain');
-  const r = verifyChain(JOSH_ROOT, date);
+  const r = verifyChain(JOSH_ROOT, date, { strict });
   const tail = (r.unchained > 0)
-    ? `  (chained: ${r.chained}, unchained: ${r.unchained} legacy)`
+    ? `  (chained: ${r.chained}, unchained: ${r.unchained} ${strict ? 'unattributable' : 'legacy'})`
     : `  (${r.chain_length} events)`;
   if (r.valid) {
     log(`audit ${date}: VALID${tail}`);
