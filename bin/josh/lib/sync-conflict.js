@@ -30,14 +30,18 @@ function findConflicts(joshRoot, opts = {}) {
   return out;
 }
 
+// The `.sync-conflict-<timestamp>-<host>` segment Syncthing splices into a name:
+//   foo.sync-conflict-20260510-1500-HOST.txt   → foo.txt
+//   somedir.sync-conflict-20260510-1500-HOST   → somedir
+const MARKER_RE = /\.sync-conflict-[0-9]{8}-[0-9]{4,6}-[A-Za-z0-9_-]+/;
+
+function stripConflictMarker(name) {
+  return name.replace(MARKER_RE, '');
+}
+
 function canonicalSiblingPath(conflictPath) {
-  // Strip the `.sync-conflict-<timestamp>-<host>` segment. Pattern Syncthing produces:
-  //   foo.sync-conflict-20260510-1500-HOST.txt   → foo.txt
-  //   somedir.sync-conflict-20260510-1500-HOST   → somedir
   const dir = path.dirname(conflictPath);
-  const base = path.basename(conflictPath);
-  const stripped = base.replace(/\.sync-conflict-[0-9]{8}-[0-9]{4,6}-[A-Za-z0-9_-]+/, '');
-  return path.join(dir, stripped);
+  return path.join(dir, stripConflictMarker(path.basename(conflictPath)));
 }
 
 function ulidCandidate(name) {
@@ -47,10 +51,22 @@ function ulidCandidate(name) {
 }
 
 function pickWinner(canonicalName, conflictName) {
-  const a = ulidCandidate(canonicalName) || canonicalName;
-  const b = ulidCandidate(conflictName)  || conflictName;
-  // Lexicographic sort; later ULID is greater.
-  return a >= b ? 'canonical' : 'conflict';
+  // Compare like with like. `conflictName` is `canonicalName` with the marker
+  // spliced in, so comparing the raw names never compared the two files - it
+  // compared the canonical extension against the literal text
+  // `sync-conflict-...`. The winner was therefore decided by whether the
+  // extension sorted before or after `s`: a `.json` or `.md` file always lost
+  // its canonical copy, a `.txt` or `.yaml` file always kept it. Same policy,
+  // opposite outcome, chosen by the alphabet.
+  const a = stripConflictMarker(canonicalName);
+  const b = stripConflictMarker(conflictName);
+  const ua = ulidCandidate(a) || a;
+  const ub = ulidCandidate(b) || b;
+  // Lexicographic sort; later ULID is greater. Two copies of one file now tie
+  // honestly, and the tie goes to canonical: the copy every machine already
+  // agrees on stays where it is and the divergent one is archived - archived,
+  // not deleted, so the losing side is always recoverable.
+  return ua >= ub ? 'canonical' : 'conflict';
 }
 
 function ensureConflictsArchive(joshRoot, dateStr) {
