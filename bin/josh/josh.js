@@ -1814,6 +1814,7 @@ function cmdComplete(args) {
         note:           { type: 'string' },
         'skip-verify':  { type: 'boolean' },
         'skip-handoff': { type: 'boolean' },
+        force:          { type: 'boolean' },
       },
       allowPositionals: true,
       strict: true
@@ -1831,6 +1832,25 @@ function cmdComplete(args) {
 
   const todo = readJson(located.path);
   if (!todo) return errExit(`malformed todo at ${located.relative}`, 4);
+
+  // `complete` is an assertion that the claimed work is finished, and only the
+  // agent holding the claim is in a position to make it. Without this check any
+  // actor could close out another agent's in-flight todo: the folder moves to
+  // done/ underneath the agent still working in it, and `completed_by` records
+  // whoever ran the command rather than whoever did the work.
+  //
+  // The claim TTL is the intended route for taking over abandoned work — `tick`
+  // expires a stale claim and returns the todo to the queue — so a supervisor
+  // does not need to reach past a live claim. `--force` stays for the case where
+  // they must, and the audit event records it.
+  const claimant = todo.claim && todo.claim.by;
+  if (claimant && claimant !== actor && !parsed.values.force) {
+    return errExit(
+      `todo is claimed by ${claimant}, not ${actor}. `
+      + `Wait for the claim to expire, or pass --force to complete it anyway.`,
+      3
+    );
+  }
 
   if (todo.verify && todo.verify.type === 'command' && !parsed.values['skip-verify']) {
     try {
@@ -1871,7 +1891,13 @@ function cmdComplete(args) {
       t.completed_by = actor;
       if (parsed.values.note) t.completion_note = parsed.values.note;
     },
-    audit: { action: 'todo.completed', details: parsed.values.note ? { note: parsed.values.note } : {} }
+    audit: {
+      action: 'todo.completed',
+      details: {
+        ...(parsed.values.note ? { note: parsed.values.note } : {}),
+        ...(claimant && claimant !== actor ? { forced: true, claimed_by: claimant } : {})
+      }
+    }
   });
   if (r.error) return errExit(r.error, r.code);
   // Lifecycle event: terminal "done" with success=true.
