@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { canonicalJson } = require('./canonical-json');
-const { loadAuditKey, currentKeyId, listAuditKeys, mintAuditKey } = require('./audit-key');
+const { loadAuditKey, currentKeyId, listAuditKeys, mintAuditKey, currentAuditKeyId } = require('./audit-key');
 
 const GENESIS_HMAC = Buffer.alloc(32, 0).toString('hex');
 
@@ -41,8 +41,7 @@ function appendChainedAudit(joshRoot, eventInput, opts = {}) {
   // Resolve key id: use most-recent existing key, mint one if none.
   let keyId = opts.key_id;
   if (!keyId) {
-    const all = listAuditKeys(joshRoot);
-    keyId = all[all.length - 1] || null;
+    keyId = currentAuditKeyId(joshRoot);
     if (!keyId) {
       const m = mintAuditKey(joshRoot);
       keyId = m.key_id;
