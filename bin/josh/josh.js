@@ -1016,7 +1016,23 @@ function cmdInit() {
   return 0;
 }
 
-function cmdStatus() {
+function cmdStatus(args = []) {
+  // `josh status` took no arguments at all, so it never parsed its argv: every
+  // flag was silently ignored. `josh status --json` exited 0 and printed the
+  // human table, which is the worst answer for a caller that asked for JSON —
+  // it looks like it worked. Every other read command in this CLI (`list todo`,
+  // `list approvals`, `host show`, `sprint list`, `tool list`, `lock list`)
+  // already supports --json; status, the one an orchestrator polls most, did not.
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: { json: { type: 'boolean' } },
+      allowPositionals: false,
+      strict: true
+    });
+  } catch (e) { return errExit(e.message, 1); }
+
   const statusPath = path.join(JOSH_ROOT, 'status.json');
   const status = readJson(statusPath);
   if (!status) {
@@ -1024,6 +1040,11 @@ function cmdStatus() {
     return 2;
   }
   refreshQueueCounts(status);
+
+  if (parsed.values.json) {
+    log(JSON.stringify({ ...status, josh_root: JOSH_ROOT }, null, 2));
+    return 0;
+  }
 
   log(`josh status — ${JOSH_ROOT}`);
   log(`updated: ${status.updated_at}`);
@@ -4565,7 +4586,7 @@ function cmdHelp() {
   log(``);
   log(`commands:`);
   log(`  init                          create the directory tree (idempotent)`);
-  log(`  status                        pretty-print the status board`);
+  log(`  status [--json]               pretty-print the status board (--json for machines)`);
   log(`  push todo "title" [flags]     create a new todo in incoming/`);
   log(`  list todo [--state STATE]     list todos (defaults to live states)`);
   log(`  show <id>                     print any artifact by ID (full or last-6)`);
