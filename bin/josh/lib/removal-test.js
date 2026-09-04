@@ -22,9 +22,20 @@ function applyRemovalTest(brief, goldFailures, opts = {}) {
   const lines = (brief || '').split('\n');
   const failureWords = buildFailureKeywordSet(goldFailures || []);
   const protectHeadings = opts.protectHeadings !== false;
+
+  // With no failure keywords there is nothing for any line to correlate with, so
+  // the rule "prune what no failure touches" marked the entire brief for removal
+  // - mission, acceptance gates and the Do Not Do list included. An agent with a
+  // clean record got a recommendation to delete the rules that produced it.
+  //
+  // No evidence is not evidence for removal. When there is no failure data the
+  // honest answer is that this test cannot say anything, so it keeps everything
+  // and says why.
+  const haveEvidence = failureWords.size > 0;
   const out = lines.map((line) => {
     const trimmed = line.trim();
     if (!trimmed) return { line, decision: 'keep', reason: 'blank' };
+    if (!haveEvidence) return { line, decision: 'keep', reason: 'no_failure_data' };
     if (protectHeadings && /^#+\s/.test(trimmed)) {
       return { line, decision: 'keep', reason: 'heading' };
     }
@@ -42,6 +53,9 @@ function applyRemovalTest(brief, goldFailures, opts = {}) {
     annotated: out,
     keep_count: out.filter((x) => x.decision === 'keep').length,
     prune_count: out.filter((x) => x.decision === 'prune').length,
+    // Whether this run had anything to reason from. A prune_count of 0 with
+    // have_failure_data false means "cannot tell", not "nothing to remove".
+    have_failure_data: haveEvidence,
   };
 }
 
