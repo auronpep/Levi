@@ -54,11 +54,56 @@ function sendJson(res, status, obj) {
   res.end(JSON.stringify(obj));
 }
 
+// The bridge binds to 127.0.0.1, which keeps other machines out but not the
+// browser already running on this one. A page on any site can issue a
+// cross-origin POST to a localhost port; if that request is CORS-"simple" the
+// browser sends it without a preflight, and the side effect lands even though
+// the attacker cannot read the response.
+//
+// Measured against the unguarded bridge: a `content-type: text/plain` POST from
+// `http://untrusted.example` registered an agent with `allowed_tools: ["*"]` and
+// returned 200.
+//
+// Three guards, none of which a legitimate CLI or agent client trips:
+//
+//  1. POST bodies must be application/json. That alone makes the request
+//     non-simple, so the browser must preflight, and the preflight is not
+//     answered.
+//  2. An `Origin` header means a browser sent it. Nothing that should be talking
+//     to this bridge is a browser.
+//  3. The Host header must be a loopback name. Otherwise a DNS-rebinding host
+//     that resolves to 127.0.0.1 reaches the bridge with its own origin.
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
+
+function hostIsLoopback(hostHeader) {
+  if (!hostHeader) return false;
+  const host = String(hostHeader).replace(/:\d+$/, '');
+  return LOOPBACK_HOSTS.has(host);
+}
+
+function guardRequest(req) {
+  if (req.headers && req.headers.origin) {
+    return 'requests carrying an Origin header are refused (browser-originated)';
+  }
+  if (!hostIsLoopback(req.headers && req.headers.host)) {
+    return `Host must be a loopback address, got '${(req.headers && req.headers.host) || ''}'`;
+  }
+  if (req.method === 'POST') {
+    const ct = String((req.headers && req.headers['content-type']) || '').split(';')[0].trim().toLowerCase();
+    if (ct !== 'application/json') {
+      return `POST requires content-type: application/json, got '${ct || '(none)'}'`;
+    }
+  }
+  return null;
+}
+
 function makeApp(joshRoot) {
   return async function app(req, res) {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const route = `${req.method} ${url.pathname}`;
     try {
+      const refusal = guardRequest(req);
+      if (refusal) return sendJson(res, 403, { error: refusal });
       if (route === 'GET /healthz') {
         return sendJson(res, 200, { ok: true, version: A2A_VERSION, mcp_servers: listServers(joshRoot).length });
       }
@@ -162,4 +207,4 @@ function requestStop(joshRoot) {
   fs.writeFileSync(STOP_FLAG(joshRoot), new Date().toISOString());
 }
 
-module.exports = { A2A_VERSION, makeApp, startServer, requestStop, STOP_FLAG };
+module.exports = { A2A_VERSION, makeApp, startServer, requestStop, STOP_FLAG, guardRequest, hostIsLoopback };
