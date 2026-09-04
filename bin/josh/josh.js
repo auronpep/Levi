@@ -4179,13 +4179,48 @@ function cmdCostLog(args) {
   } catch (e) { return errExit(e.message, 1); }
   const { appendCost } = require('./lib/cost-ledger');
   const v = parsed.values;
+
+  // `parseFloat('abc')` is NaN, and appendCost's `Number.isFinite` guard turns
+  // that into 0. The result was that a mistyped amount was accepted, reported as
+  // "logged", and recorded as costing nothing — a spend report that reads $0 for
+  // a run that cost money. A number the operator supplied and we cannot parse is
+  // an error, not a zero.
+  const num = (flag, raw, parse) => {
+    if (raw === undefined) return { ok: true, value: flag === 'phase' ? null : 0 };
+    const n = parse(raw);
+    if (!Number.isFinite(n) || n < 0) {
+      return { ok: false, error: `--${flag} must be a non-negative number, got '${raw}'` };
+    }
+    return { ok: true, value: n };
+  };
+
+  const fields = [
+    ['tokens-in',  v['tokens-in'],  (s) => parseInt(s, 10)],
+    ['tokens-out', v['tokens-out'], (s) => parseInt(s, 10)],
+    ['wall',       v.wall,          (s) => parseInt(s, 10)],
+    ['usd',        v.usd,           (s) => parseFloat(s)],
+    ['phase',      v.phase,         (s) => parseInt(s, 10)],
+  ];
+  const values = {};
+  for (const [flag, raw, parse] of fields) {
+    const r = num(flag, raw, parse);
+    if (!r.ok) return errExit(r.error, 1);
+    values[flag] = r.value;
+  }
+
+  // A row with no todo and no agent cannot be grouped by anything; it only
+  // inflates `run_count` in `josh cost summary`.
+  if (!v.todo && !v.agent) {
+    return errExit('cost log requires at least --todo <id> or --agent <id>', 1);
+  }
+
   const p = appendCost(JOSH_ROOT, {
     todo_id: v.todo, agent_id: v.agent, model: v.model,
-    tokens_in: v['tokens-in'] ? parseInt(v['tokens-in'], 10) : 0,
-    tokens_out: v['tokens-out'] ? parseInt(v['tokens-out'], 10) : 0,
-    wall_seconds: v.wall ? parseInt(v.wall, 10) : 0,
-    usd: v.usd ? parseFloat(v.usd) : 0,
-    phase: v.phase != null ? parseInt(v.phase, 10) : null,
+    tokens_in: values['tokens-in'],
+    tokens_out: values['tokens-out'],
+    wall_seconds: values.wall,
+    usd: values.usd,
+    phase: values.phase,
     sentinel: v.sentinel || null,
   });
   log(`logged → ${path.relative(JOSH_ROOT, p).replace(/\\/g, '/')}`);
