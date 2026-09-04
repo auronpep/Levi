@@ -4410,10 +4410,34 @@ function cmdHostCapacitySet(args) {
     });
   } catch (e) { return errExit(e.message, 1); }
   const { writeCapacity, currentHost } = require('./lib/host');
+
+  // `parseInt('abc', 10)` is NaN, which JSON.stringify writes as null, and
+  // backpressure's `Number.isFinite` guard then ignores it. So a mistyped cap was
+  // accepted, reported as "wrote capacity", and had no effect — the machine kept
+  // running at the default while the operator believed it was limited. On a fleet
+  // this is the command used to hold back a weaker PC.
   const cap = {};
-  if (parsed.values['max-concurrent']) cap.max_concurrent = parseInt(parsed.values['max-concurrent'], 10);
-  if (parsed.values['max-concurrent-per-phase']) cap.max_concurrent_per_phase = parseInt(parsed.values['max-concurrent-per-phase'], 10);
-  if (parsed.values['max-concurrent-per-agent']) cap.max_concurrent_per_agent = parseInt(parsed.values['max-concurrent-per-agent'], 10);
+  const FLAGS = [
+    ['max-concurrent', 'max_concurrent'],
+    ['max-concurrent-per-phase', 'max_concurrent_per_phase'],
+    ['max-concurrent-per-agent', 'max_concurrent_per_agent'],
+  ];
+  for (const [flag, key] of FLAGS) {
+    const raw = parsed.values[flag];
+    if (raw === undefined) continue;
+    const n = parseInt(raw, 10);
+    if (!Number.isFinite(n) || n < 0 || String(n) !== String(raw).trim()) {
+      return errExit(`--${flag} must be a non-negative integer, got '${raw}'`, 1);
+    }
+    cap[key] = n;
+  }
+  if (Object.keys(cap).length === 0) {
+    return errExit(
+      `capacity-set requires at least one of: ${FLAGS.map(([f]) => '--' + f).join(', ')}`,
+      1
+    );
+  }
+
   const host = parsed.values.host || currentHost();
   const p = writeCapacity(JOSH_ROOT, host, cap);
   log(`wrote capacity for ${host} → ${path.relative(JOSH_ROOT, p).replace(/\\/g, '/')}`);
