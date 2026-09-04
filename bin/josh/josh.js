@@ -310,6 +310,25 @@ function locateReview(idOrSuffix) {
   };
 }
 
+// Replying to or acking a handoff consumes it: the file leaves the recipient's
+// incoming/ and lands in processed/. Doing that for a message addressed to
+// someone else means the intended recipient never sees the request and it is
+// permanently marked handled — and for `reply`, an answer is fabricated under
+// the wrong agent's name.
+//
+// Returns an error code to propagate, or null when the actor may proceed.
+// Exit 1 (validation) rather than 3: this is not contention over a resource,
+// it is an actor that does not match the message's `to` field.
+function assertHandoffRecipient(handoff, actor, force, verb) {
+  const to = handoff && handoff.to;
+  if (!to || to === actor || force) return null;
+  return errExit(
+    `handoff is addressed to ${to}, not ${actor}; cannot ${verb} it. `
+    + `Pass --force to override.`,
+    1
+  );
+}
+
 const VALID_REVIEW_VERDICTS = ['approve', 'request_changes', 'block'];
 const VALID_SUBJECT_TYPES   = ['pr', 'file', 'approach', 'todo'];
 const VALID_FRAMINGS        = ['regular', 'adversarial'];
@@ -2133,7 +2152,8 @@ function cmdReply(args) {
         body:  { type: 'string' },
         kind:  { type: 'string' },
         as:    { type: 'string' },
-        actor: { type: 'string' }
+        actor: { type: 'string' },
+        force: { type: 'boolean' }
       },
       allowPositionals: true,
       strict: true
@@ -2155,6 +2175,9 @@ function cmdReply(args) {
     return errExit(`--kind must be one of: ${HANDOFF_KINDS.join(', ')}`, 1);
   }
   const actor = resolveActor(parsed.values);
+
+  const recipientCheck = assertHandoffRecipient(orig, actor, parsed.values.force, 'reply to');
+  if (recipientCheck) return recipientCheck;
 
   // Recipient of the reply = sender of the original. Map to a known agent dir
   // by matching the prefix or exact value.
@@ -2223,7 +2246,8 @@ function cmdAck(args) {
       options: {
         as:    { type: 'string' },
         actor: { type: 'string' },
-        note:  { type: 'string' }
+        note:  { type: 'string' },
+        force: { type: 'boolean' }
       },
       allowPositionals: true,
       strict: true
@@ -2237,6 +2261,9 @@ function cmdAck(args) {
   const located = locateHandoff(idArg);
   if (located.error) return errExit(located.error, located.code);
   if (located.state === 'processed') return errExit('already processed', 1);
+
+  const ackRecipientCheck = assertHandoffRecipient(readJson(located.path), actor, parsed.values.force, 'ack');
+  if (ackRecipientCheck) return ackRecipientCheck;
 
   const r = moveHandoffToProcessed(located, actor, 'acked',
     parsed.values.note ? { note: parsed.values.note } : {});
