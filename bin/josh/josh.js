@@ -328,7 +328,7 @@ function locateTodo(idOrSuffix, expectedStates) {
     'blocked', 'failed', 'cancelled',
   ];
   let exactHit = null;
-  let suffixHit = null;
+  const suffixHits = [];
   for (const state of ALL_STATES) {
     const dir = path.join(JOSH_ROOT, 'todo', state);
     let entries;
@@ -340,13 +340,25 @@ function locateTodo(idOrSuffix, expectedStates) {
         break;
       }
       if (idOrSuffix.length >= 4 && idOrSuffix.length < 26 && e.name.endsWith(idOrSuffix)) {
-        if (!suffixHit) suffixHit = { state, id: e.name };
-        else suffixHit.collision = true;
+        suffixHits.push({ state, id: e.name });
       }
     }
     if (exactHit) break;
   }
-  const hit = exactHit || suffixHit;
+  // Every caller of locateTodo is about to change a todo's state. An id suffix
+  // that matches more than one todo cannot say which, and picking the first one
+  // means cancelling, failing or completing an arbitrary todo the operator did
+  // not name. `josh show` already warns about this case; the destructive paths
+  // silently guessed. An exact id is never ambiguous, so the way out is to type
+  // the full id.
+  if (!exactHit && suffixHits.length > 1) {
+    const names = suffixHits.map((h) => h.id).sort().join(', ');
+    return {
+      error: `id suffix '${idOrSuffix}' is ambiguous — matches ${suffixHits.length} todos: ${names}. Use the full id.`,
+      code: 1,
+    };
+  }
+  const hit = exactHit || suffixHits[0];
   if (!hit) return { error: 'not found', code: 2 };
   if (expectedStates && !expectedStates.includes(hit.state)) {
     return { error: `todo is in state '${hit.state}', expected one of: ${expectedStates.join(', ')}`, code: 1 };
