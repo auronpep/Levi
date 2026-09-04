@@ -32,11 +32,27 @@ function appendCost(joshRoot, entry) {
   return p;
 }
 
+// A ledger line that is missing a numeric field - an older schema, a
+// hand-edited row, a half-written append - must not be able to turn every
+// total in the report into NaN. Sums are only meaningful if each addend is
+// a number, so coerce on read, at the single point every consumer goes
+// through, rather than guarding at each `+`.
+function num(v) {
+  return Number.isFinite(v) ? v : 0;
+}
+
 function readCostsForMonth(joshRoot, yyyymm) {
   const p = ledgerPath(joshRoot, yyyymm || currentMonth());
   if (!fs.existsSync(p)) return [];
   return fs.readFileSync(p, 'utf8').split('\n').filter(Boolean).map((l) => {
-    try { return JSON.parse(l); } catch (e) { return null; }
+    let e;
+    try { e = JSON.parse(l); } catch (err) { return null; }
+    if (!e || typeof e !== 'object' || Array.isArray(e)) return null;
+    e.tokens_in = num(e.tokens_in);
+    e.tokens_out = num(e.tokens_out);
+    e.wall_seconds = num(e.wall_seconds);
+    e.usd = num(e.usd);
+    return e;
   }).filter(Boolean);
 }
 
