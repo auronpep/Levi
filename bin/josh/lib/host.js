@@ -31,6 +31,10 @@ function readCapacity(joshRoot, host) {
 
 function writeCapacity(joshRoot, host, capacity) {
   const p = capacityPath(joshRoot, host);
+  // Every other writer in lib/ (lessons, mcp-registry, stignore, …) creates its
+  // parent directory first. Without this, declaring capacity on a host whose
+  // JOSH_ROOT has not been initialised yet fails with a raw ENOENT.
+  fs.mkdirSync(path.dirname(p), { recursive: true });
   const tmp = p + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify({ schema: 1, host: host || currentHost(), ...capacity }, null, 2) + '\n');
   fs.renameSync(tmp, p);
